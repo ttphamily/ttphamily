@@ -1,5 +1,5 @@
-- 👋 Hi, I’m Thai - AI 
-- 👀 I’m interested in AI and the Future
+- 👋 Hi, I’m TH-AI 
+- 👀 Prepare for the future. Save the future. 
 
 
 <!---
