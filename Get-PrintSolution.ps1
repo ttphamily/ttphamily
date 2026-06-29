@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--List of Files that should be excluded when redirecting -Andy Morales-->
+<FrxProfileFolderRedirection ExcludeCommonFolders="0">
+  <Excludes>
+	<!--All of these should be redirected-->
+	<Exclude Copy="0">Downloads</Exclude>
+	<Exclude Copy="0">Desktop</Exclude>
+	<Exclude Copy="0">Favorites</Exclude>
+	<Exclude Copy="0">Documents</Exclude>
+
+	<!--Details here https://docs.microsoft.com/en-us/microsoftteams/teams-for-vdi#teams-cached-content-exclusion-list-for-non-persistent-setup-->
+    <Exclude Copy="0">AppData\Roaming\Microsoft\Teams\media-stack</Exclude>
+	<Exclude Copy="0">AppData\Roaming\Microsoft\Teams\meeting-addin\Cache</Exclude>
+
+    <!--Spotify-->
+    <Exclude Copy="0">AppData\Local\Spotify\Storage</Exclude>
+    <Exclude Copy="0">AppData\Local\Spotify\Data</Exclude>
+
+    <!--Misc Windows-->
+	<!--breaks start menu http://disq.us/p/29z120j
+    <Exclude Copy="0">AppData\Local\Microsoft\Windows\Caches</Exclude>
+	-->
+	<!--<Exclude Copy="0">AppData\LocalLow</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Terminal Server Client</Exclude>-->
+
+    <!--Java-->
+    <Exclude Copy="0">AppData\Roaming\Sun\Java\Deployment\cache</Exclude>
+    <Exclude Copy="0">AppData\Roaming\Sun\Java\Deployment\tmp</Exclude>
+
+    <!--IE-->
+    <Exclude Copy="0">AppData\Local\Microsoft\Windows\INetCache</Exclude>
+
+    <!--Firefox-->
+    <Exclude Copy="0">AppData\Local\Mozilla\Firefox</Exclude>
+
+	<!--Google Earth-->
+	<Exclude Copy="0">AppData\LocalLow\Google\GoogleEarth\Cache</Exclude>
+
+	<!--Webex Cache-->
+	<Exclude Copy="0">AppData\Local\WebEx\wbxcache</Exclude>
+
+    <!--Chrome-->
+	<!--Removed because it would cause webpages to load incorrectly every first launch
+    <Exclude Copy="0">AppData\Local\Google\Chrome\User Data\Default\Cache</Exclude>
+    <Exclude Copy="0">AppData\Local\Google\Chrome\User Data\ShaderCache</Exclude>
+    <Exclude Copy="0">AppData\Local\Google\Chrome\User Data\Default\Code Cache\js</Exclude>
+    <Exclude Copy="0">AppData\Local\Google\Chrome\User Data\BrowserMetrics</Exclude>
+    <Exclude Copy="0">AppData\Roaming\GoogleChrome\UserData\Default\Code Cache\js</Exclude>
+    <Exclude Copy="0">AppData\Roaming\Google\Chrome\UserData\ShaderCache</Exclude>
+    <Exclude Copy="0">AppData\Roaming\Google\Chrome\UserData\BrowserMetrics</Exclude>
+	-->
+
+    <!--Edge-->
+	<!--Removed because it would cause webpages to load incorrectly every first launch
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge Beta\User Data\Default\Cache</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge Beta\User Data\Default\Code Cache\js</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge Beta\User Data\ShaderCache</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge Beta\User Data\BrowserMetrics</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge\User Data\Default\Cache</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge\User Data\Default\Code Cache\js</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge\User Data\ShaderCache</Exclude>
+    <Exclude Copy="0">AppData\Local\Microsoft\Edge\User Data\BrowserMetrics</Exclude>
+	-->
+  </Excludes>
+</FrxProfileFolderRedirection>

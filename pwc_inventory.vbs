@@ -1,0 +1,5877 @@
+#requires -Version 7.0
+#requires -RunAsAdministrator
+#requires -Modules ExchangeOnlineManagement
+
+$script:GraphHeaders = $null
+<#
+TODO: Add Department Group Mapping on line 3102 at $setDepartmentMappings
+.SYNOPSIS
+    Creates a new user based on a template user in Active Directory and Microsoft 365.
+
+.DESCRIPTION
+    This script creates a new user account by copying attributes and group memberships
+    from an existing template user. It handles ONLY Microsoft Entra/365 setup.
+
+    The script will display a GUI window to collect:
+    - New user's full name
+    - Template user to copy from
+    - Phone number
+    - Required license selection
+    - Optional ancillary licenses
+
+    IMPORTANT: This script must be run from the Primary Domain Controller.
+
+    NOTE: Sensitive information (app IDs, certificates, etc.) is stored in a secure configuration file managed by Get-ScriptConfig.
+    The config file should be placed at: C:\ProgramData\CompassScripts\config.json
+
+.EXAMPLE
+    .\Invoke-MgNewUserRequest.ps1
+
+    This will launch the GUI window to collect the required information.
+
+.NOTES
+    Author: Chris Williams
+    Created: 2022-03-02
+
+    Version History:
+    ------------------------------------------------------------------------------
+    Version    Date         Changes
+    -------    ----------  -------------------------------------------------------
+    4.4.5      2026-05-27   Bug Fixes:
+                            - Fixed issue where Send-GraphMailMessage failed with a Graph API schema error when sending to a single recipient
+                                PowerShell was unwrapping the one-element array from the normalizeAddresses scriptblock, causing toRecipients to serialize as an object instead of an array in the JSON payload.
+                            - Fixed 405 Method Not Allowed error during PSA Primary Engineer field update: PATCH is not supported on system/userDefinedFields in CWM API 2026.5. Converted to PUT with full field definition round-trip.
+
+    4.4.4      2026-05-07   Feature Updates:
+                            - Added People Ops Partner extraction from HiBob import footer ("This email was sent by [Name].")
+                            - Added People Ops Partner form field (txtPeopleOpsPartner) in right column below Manager
+                            - Added Graph API lookup to resolve People Ops Partner display name to email address
+                            - Added email notification to Users hiring manager and People Ops Partner with account details and instructions to share credentials directly with new hire
+                            - People Ops Partner is now CC'd on new hire notification email when resolved
+                            - Reordered right column fields: Fax Number → Manager → People Ops Partner
+                            - Replaced single-prompt duplicate email check with a loop that re-prompts until a unique address is confirmed or the user cancels
+
+    4.4.3      2026-05-07   UI Refactoring:
+                            - Merged New-DuplicatePromptForm into Show-CustomAlert via optional -DefaultValue parameter (input mode returns entered string or $null)
+                            - Removed New-DuplicatePromptForm function; updated caller to use Show-CustomAlert
+                            - Fixed Show-CustomAlert window drag: replaced non-functional 5px Top_Bar with DragArea border using Add_MouseLeftButtonDown and GetWindow()
+                            - Added -Owner parameter to Show-CustomAlert for centering child popups over parent window
+                            - Fixed WindowStartupLocation: defaults to CenterScreen, switches to CenterOwner when -Owner is provided
+                            - Removed [System.Windows.Window] type annotation from $Owner parameter (PresentationFramework not loaded at param binding time)
+
+    4.4.2      2026-05-07   Bug Fixes and Code Quality:
+                            - Fixed progress step name mismatch for Connectwise PSA Member Creation step
+                            - Fixed progress step list order to match execution order (Mailbox Provisioning before Set Timezone)
+                            - Fixed Set-FormFromHiBobData copy operations not correctly clearing ComboBox selection
+                            - Fixed missing -Message parameter in Get-ScriptConfig status output
+                            - Fixed mailNickname generation to use First.Last format consistent with UPN prefix
+                            - Fixed $IsProfessionalServices uninitialized variable in New-ConnectwisePSAMember
+                            - Fixed ConvertTo-Json missing -Depth parameter in Get-ScriptConfig
+                            - Fixed word list null handling in New-ReadablePassword for missing word length buckets
+                            - Removed duplicate Show-CustomAlert definition inside Get-NewUserRequest
+                            - Removed stale help text referencing Microsoft.Graph module from Send-GraphMailMessage
+                            - Updated duplicate email check to use proxyAddresses with client-side verification to prevent false positives from eventual consistency index
+
+    4.4.1      2026-05-06   Feature Updates:
+                                - Added ConnectWise Manage API integration for automatic creation of PSA members based on new users
+
+    4.4.0      2026-04-27   Refactor:
+                               - Migrated all Graph calls from Microsoft.Graph module to Invoke-RestMethod
+                               - Replaced Connect-MgGraph/Disconnect-MgGraph with Get-GraphToken certificate auth
+                               - Removed dependency on Microsoft.Graph.Users and Microsoft.Graph.Groups modules
+                               - All relative Graph URIs normalized to full https://graph.microsoft.com URLs
+                               - Removed Connect-ServiceEndpoints and moved Graph connection logic to Get-GraphToken for better modularity and token management
+                               - Moved Exchange Online connection outside function with plans to add it to Get-GraphToken in the future
+                               - Started exploring Exchange REST API for mailbox operations in preparation for moving those operations away from the ExchangeOnlineManagement module
+
+    4.3.2      2026-04-23   Feature Updates:
+                               - Refactored UI for better user experience and streamlined workflow
+                               - Cleaned up old code and functions that are no longer used after refactor
+                               - Improved error handling and user feedback throughout the script
+                               - Added SapienceIQ provisioning and UI elements
+                               - Added default groups for standard users
+                               - Variable cleanup and optimization
+
+    4.3.1      2026-04-08   Feature Updates:
+                               - Refactored Country-to-Code mapping for improved readability and maintainability
+                               - Added auto-update for Usage Location combo box when Country or City fields are modified
+
+    4.3.0      2025-06-25   Feature Updates:
+                                - Started conversion process to move away from Graph Powershell to GraphAPI via Invoke-MgGraphRequest.
+
+    4.2.0      2025-06-25   Feature Updates:
+                                - Removed AD Tasks as Compass is now Entra Only
+                                - NOTE: Script will not longer create AD Users
+
+    4.1.0      2025-04-29   Feature Updates:
+                                - Added Cloud Only Switch
+
+    4.0.0      2025-04-07   Major UI and functions refactor:
+                                - Changed UI to use winui 3 styles for easier management and better visuals
+                                - Refactor user creation functions in preparation for Forms/Power Automate Flow execution
+                                - Added JSON input for user creation data
+                                - Changed license assignment and groups to use Graph API due to PowerShell SDK bugs
+                                - Added additional error checks and logging
+                                - Enhanced group operations and better error handling
+                                - Added mailbox provisioning check before group operations
+                                - Added comprehensive operation summary with detailed status tracking
+                                - Enhanced error messages and user feedback throughout the process
+
+    3.3.0      2025-04-01   Zoom Phone Removal:
+                                - Removed provisioning steps for Zoom Phone and Contact Center as we are moving to 8x8
+
+    3.2.0      2025-02-03   Zoom Phone Onboarding:
+                                - Added provisioning steps for Zoom Phone and Contact Center
+
+    3.1.0      2025-01-25   Password System Update:
+                                - Replaced New-SecureRandomPassword with New-ReadablePassword
+                                - Added human-readable password generation using word list
+                                - Added interactive password acceptance/rejection
+                                - Added GitHub wordlist integration
+                                - Added support for custom word lists
+                                - Added configurable word count (2-20 words)
+                                - Added spaces/no-spaces password formatting options
+
+    3.0.0      2025-01-20   Major Rework:
+                                - Complete script reorganization and optimization
+                                - Optimized UI spacing and element alignment
+                                - Enhanced form layout for improved readability
+                                - Added secure configuration management via Get-ScriptConfig
+                                - Enhanced error handling and logging system
+                                - Added progress tracking and status messaging
+
+    2.1.0      2024-10-15   Feature Update:
+                                - Added BookWithMeId validation
+                                - Enhanced AD Sync loop handling
+                                - Reworked GUI interface
+                                - Added QuickEdit and InsertMode functions
+                                - Added SMTP duplicate checking
+                                - Removed KnowBe4 SCIM integration per SecurePath Team
+                                - Added Email Forwarding functionality - KnowBe4 Notification
+
+    2.0.0      2024-05-08   Major Feature Update:
+                                - Added input box system
+                                - Added EntraID P2 license checkbox
+                                - Enhanced UI boxes for variables
+                                - Added KB4 email delivery
+                                - Added MeetWithMeId and AD properties
+                                - Updated KnowBe4 SCIM integration
+                                - Added template user validation
+
+    1.2.0       2024-02-12  Feature Updates:
+                                - Enhanced license display output
+                                - Improved group management functions
+                                - Added KnowBe4 SCIM integration
+
+    1.1.0       2022-06-27  Feature Updates:
+                                - Added duplicate attribute checking
+                                - Added fax attributes copying
+                                - Enhanced group lookup and management
+                                - Added AD sync validation
+
+    1.0.0       2022-03-02  Initial Release:
+                                - Basic user creation functionality
+                                - Template user copying
+                                - Group membership handling
+    ------------------------------------------------------------------------------
+#>
+
+# Disable console quick edit
+function Set-ConsoleProperties {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [ValidateSet('Enable', 'Disable')]
+        [string]$QuickEditMode = 'Enable',
+
+        [Parameter()]
+        [ValidateSet('Enable', 'Disable')]
+        [string]$InsertMode = 'Enable'
+    )
+
+    $signature = @'
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleMode {
+        private const uint ENABLE_QUICK_EDIT = 0x0040;
+        private const uint ENABLE_INSERT_MODE = 0x0020;
+        private const int STD_INPUT_HANDLE = -10;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+        public static void SetMode(bool enableQuickEdit, bool enableInsert) {
+            IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
+            uint mode;
+
+            if (!GetConsoleMode(handle, out mode)) {
+                throw new Exception("Failed to get console mode");
+            }
+
+            mode = enableQuickEdit ? mode | ENABLE_QUICK_EDIT : mode & ~ENABLE_QUICK_EDIT;
+            mode = enableInsert ? mode | ENABLE_INSERT_MODE : mode & ~ENABLE_INSERT_MODE;
+
+            if (!SetConsoleMode(handle, mode)) {
+                throw new Exception("Failed to set console mode");
+            }
+        }
+    }
+'@
+
+    try {
+        # Add the type if it doesn't exist
+        if (-not ('ConsoleMode' -as [type])) {
+            Add-Type -TypeDefinition $signature -Language CSharp
+        }
+
+        # Convert parameters to boolean values
+        $quickEdit = $QuickEditMode -eq 'Enable'
+        $insert = $InsertMode -eq 'Enable'
+
+        # Set the console modes
+        [ConsoleMode]::SetMode($quickEdit, $insert)
+
+        Write-Verbose "Console properties updated successfully: QuickEdit=$QuickEditMode, Insert=$InsertMode"
+    } catch {
+        Write-Error "Failed to set console properties: $($_.Exception.Message)"
+    }
+}
+
+Set-ConsoleProperties -QuickEditMode Disable -InsertMode Disable
+
+$script:TestMode = $false  # Default to false
+
+$ErrorActionPreference = 'Stop'
+# Only show verbose output if -Verbose is specified
+if (-not $PSBoundParameters['Verbose']) {
+    $VerbosePreference = 'SilentlyContinue'
+}
+
+Clear-Host
+
+$script:Version = (Select-String -Path $PSCommandPath -Pattern '^\s+(\d+\.\d+\.\d+)\s+\d{4}-\d{2}-\d{2}' | Select-Object -First 1).Matches.Groups[1].Value
+Write-Host "`n  Initializing New User Creation Script v$script:Version..." -ForegroundColor Cyan
+$startTime = Get-Date
+Write-Host "  Started at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
+
+Write-Host "  [ ] Loading functions..." -NoNewline -ForegroundColor Yellow
+
+#region Standard Functions
+
+function Exit-Script {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [Parameter()]
+        [ValidateSet(
+            'Success',
+            'Cancelled',
+            'ConfigError',
+            'ConnectionError',
+            'UserNotFound',
+            'PermissionError',
+            'DuplicateUser',
+            'GeneralError'
+        )]
+        [string]$ExitCode = 'GeneralError'
+    )
+
+    try {
+        # Map exit codes to numeric values
+        $exitCodes = @{
+            'Success'         = 0
+            'Cancelled'       = 1
+            'ConfigError'     = 2
+            'ConnectionError' = 3
+            'UserNotFound'    = 4
+            'PermissionError' = 5
+            'DuplicateUser'   = 6
+            'GeneralError'    = 99
+        }
+
+        # Map exit codes to message types
+        $messageTypes = @{
+            'Success'         = 'OK'
+            'Cancelled'       = 'WARN'
+            'ConfigError'     = 'ERROR'
+            'ConnectionError' = 'ERROR'
+            'UserNotFound'    = 'ERROR'
+            'PermissionError' = 'ERROR'
+            'DuplicateUser'   = 'ERROR'
+            'GeneralError'    = 'ERROR'
+        }
+
+        # Only disconnect if not in test mode
+        if (-not $script:TestMode) {
+            Write-StatusMessage -Message "Disconnecting from services..." -Type INFO
+            try {
+                # Disconnect
+                $script:GraphHeaders = $null
+                Disconnect-ExchangeOnline -Confirm:$false
+            } catch {
+                Write-StatusMessage -Message "Failed to disconnect services during exit" -Type ERROR
+            }
+        }
+
+        # Log the exit message
+        Write-StatusMessage -Message $Message -Type $messageTypes[$ExitCode]
+
+        # In test mode, don't actually exit
+        if ($script:TestMode) {
+            Write-StatusMessage -Message "Test Mode: Script would exit here with code $($exitCodes[$ExitCode]) ($ExitCode)" -Type WARN
+            if ($exitCodes[$ExitCode] -ne 0) {
+                Write-StatusMessage -Message "Entering nested prompt — all script variables are accessible. Type 'exit' to resume." -Type WARN
+                $host.EnterNestedPrompt()
+            }
+            return
+        }
+
+        # Return the appropriate exit code
+        exit $exitCodes[$ExitCode]
+    } catch {
+        # Catch-all for any unexpected errors during exit
+        Write-StatusMessage -Message "Critical error during script exit" -Type ERROR
+        if (-not $script:TestMode) {
+            exit 99
+        }
+    }
+}
+
+function Get-ScriptConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$ConfigPath = "C:\ProgramData\CompassScripts\config.json"
+    )
+
+    # Add comment-based help here
+    <#
+        .SYNOPSIS
+            Gets or creates configuration for Compass scripts.
+        .DESCRIPTION
+            Loads configuration from JSON file or creates new config with user prompts.
+        .PARAMETER ConfigPath
+            Path to the configuration file. Defaults to C:\ProgramData\CompassScripts\config.json
+        .EXAMPLE
+            $config = Get-ScriptConfig
+            Loads or creates default configuration
+        #>
+
+    try {
+        # Check for local config first
+        Write-StatusMessage -Message "Checking for local configuration file..." -Type INFO
+
+        if (Test-Path $ConfigPath) {
+            $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+            Write-StatusMessage -Message "Loaded configuration from $ConfigPath" -Type OK
+            return $config
+        }
+
+        # If no config exists, create template with prompt
+        Write-StatusMessage -Message "No configuration file found. Creating template at $ConfigPath"
+
+        # Ensure directory exists
+        $configDir = Split-Path $ConfigPath -Parent
+        if (-not (Test-Path $configDir)) {
+            New-Item -Path $configDir -ItemType Directory -Force | Out-Null
+        }
+
+        # Prompt for required values
+        $config = @{
+            ExchangeOnline = @{
+                AppId              = Read-Host "Enter Exchange Online AppId"
+                Organization       = Read-Host "Enter Organization (e.g., company.onmicrosoft.com)"
+                CertificateSubject = Read-Host "Enter Exchange Online certificate subject (e.g., CN=ExO PowerShell)"
+            }
+            Graph          = @{
+                AppId              = Read-Host "Enter Graph AppId"
+                TenantId           = Read-Host "Enter TenantId"
+                CertificateSubject = Read-Host "Enter Graph certificate subject (e.g., CN=Graph PowerShell)"
+            }
+            PnPSharePoint  = @{
+                AppId              = Read-Host "Enter PnP SharePoint AppId"
+                Url                = Read-Host "Enter SharePoint Online URL"
+                CertificateSubject = Read-Host "Enter PnP certificate subject (e.g., CN=PnP PowerShell)"
+            }
+            Paths          = @{
+                NewUserLogPath = "C:\Temp\NewUserCreation.log"
+                LogPath        = "C:\Temp\UserTermination.log"
+                ExportPath     = "C:\Temp\terminated_users_exports"
+            }
+            Email          = @{
+                NotificationFrom  = Read-Host "Enter notification from address"
+                SecurityTeamEmail = Read-Host "Enter security team email"
+            }
+            TestMode       = @{
+                Email = Read-Host "Enter test email address for development"
+            }
+        }
+
+        # Save config
+        $config | ConvertTo-Json -Depth 5 | Set-Content $ConfigPath
+
+        return $config
+    } catch {
+        Write-StatusMessage -Message "Critical error in configuration: $_" -Type ERROR
+        throw
+    }
+}
+
+function Get-GraphToken {
+    [CmdletBinding(DefaultParameterSetName = 'Secret')]
+    param (
+        [Parameter(Mandatory)]
+        [string]$TenantId,
+        [Parameter(Mandatory)]
+        [string]$ClientId,
+
+        [Parameter(Mandatory, ParameterSetName = 'Secret')]
+        [string]$ClientSecret,
+
+        [Parameter(Mandatory, ParameterSetName = 'Certificate')]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$ClientCert,
+
+        [string]$ExchangeOrg,
+        [string]$AnchorMailbox,
+        [switch]$Exchange,
+        [switch]$EXORest
+    )
+
+    $scope = if ($Exchange -or $EXORest) {
+        if (-not $ExchangeOrg) { throw "-ExchangeOrg is required for Exchange API" }
+        "https://outlook.office365.com/.default"
+    } else {
+        "https://graph.microsoft.com/.default"
+    }
+
+    $body = @{
+        client_id  = $ClientId
+        scope      = $scope
+        grant_type = "client_credentials"
+    }
+
+    if ($PSCmdlet.ParameterSetName -eq 'Certificate') {
+        $tokenUrl = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+
+        # Build x5t (base64url SHA-1 thumbprint)
+        $thumbBytes = [byte[]]::new($ClientCert.Thumbprint.Length / 2)
+        for ($i = 0; $i -lt $ClientCert.Thumbprint.Length; $i += 2) {
+            $thumbBytes[$i / 2] = [Convert]::ToByte($ClientCert.Thumbprint.Substring($i, 2), 16)
+        }
+        $x5t = [Convert]::ToBase64String($thumbBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+        $header = [Convert]::ToBase64String(
+            [System.Text.Encoding]::UTF8.GetBytes(
+                (@{ alg = 'RS256'; typ = 'JWT'; x5t = $x5t } | ConvertTo-Json -Compress)
+            )
+        ).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $payload = [Convert]::ToBase64String(
+            [System.Text.Encoding]::UTF8.GetBytes(
+                (@{
+                    aud = $tokenUrl
+                    iss = $ClientId
+                    sub = $ClientId
+                    jti = [Guid]::NewGuid().ToString()
+                    nbf = $now
+                    exp = $now + 600
+                } | ConvertTo-Json -Compress)
+            )
+        ).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+        $sigInput = "$header.$payload"
+
+        # .PrivateKey works for CAPI keys; CNG keys require the extension method via static call
+        $rsa = $ClientCert.PrivateKey
+        if (-not $rsa) {
+            $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($ClientCert)
+        }
+        if (-not $rsa) { throw "Cannot access private key for cert '$($ClientCert.Subject)'. Ensure the key is accessible under the current user/process." }
+
+        $sigBytes = if ($rsa -is [System.Security.Cryptography.RSACryptoServiceProvider]) {
+            $rsa.SignData([System.Text.Encoding]::UTF8.GetBytes($sigInput), 'SHA256')
+        } else {
+            $rsa.SignData(
+                [System.Text.Encoding]::UTF8.GetBytes($sigInput),
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+        }
+        $signature = [Convert]::ToBase64String($sigBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+        $body['client_assertion_type'] = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+        $body['client_assertion'] = "$sigInput.$signature"
+    } else {
+        $body['client_secret'] = $ClientSecret
+    }
+
+    try {
+        $response = Invoke-RestMethod -Method Post `
+            -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
+            -Body $body -ErrorAction Stop
+
+        if ($EXORest) {
+            return @{
+                Authorization  = "Bearer $($response.access_token)"
+                'Content-Type' = 'application/json'
+            }
+        } elseif ($Exchange) {
+            $existing = Get-ConnectionInformation -ErrorAction SilentlyContinue
+            if (-not $existing) {
+                Connect-ExchangeOnline -AccessToken $response.access_token -Organization $ExchangeOrg -ShowBanner:$false
+            }
+            return "Connected to Exchange Online for $ExchangeOrg"
+        } else {
+            return @{ Authorization = "Bearer $($response.access_token)"; 'Content-Type' = 'application/json' }
+        }
+
+    } catch {
+        throw "Failed to get access token: $($_.Exception.Message)"
+    }
+}
+
+function Get-ServiceCert {
+    param([string]$Subject)
+    $cert = Get-ChildItem Cert:\LocalMachine\My |
+    Where-Object { $_.Subject -like "*$Subject*" -and $_.NotAfter -gt [DateTime]::Now } |
+    Sort-Object NotAfter -Descending |
+    Select-Object -First 1
+    if (-not $cert) { Exit-Script -Message "No valid certificate found matching '$Subject'" -ExitCode ConfigError }
+    $cert
+}
+
+function Send-GraphMailMessage {
+    <#
+        .SYNOPSIS
+            Sends an email message using Microsoft Graph API.
+
+        .DESCRIPTION
+            This function sends an email message using Microsoft Graph API with support for HTML content,
+            CC recipients, and file attachments.
+
+        .PARAMETER Subject
+            The subject line of the email.
+
+        .PARAMETER Content
+            The body content of the email.
+
+        .PARAMETER FromAddress
+            The sender's email address. Defaults to value in $config.Email.NotificationFrom.
+
+        .PARAMETER ToAddress
+            The recipient's email address. Defaults to value in $config.Email.SecurityTeamEmail.
+
+        .PARAMETER CcAddress
+            Optional array of CC recipient email addresses.
+
+        .PARAMETER ContentType
+            The type of content in the email body. Must be either 'HTML' or 'Text'. Defaults to 'HTML'.
+
+        .PARAMETER AttachmentPath
+            Optional path to a file to attach to the email.
+
+        .PARAMETER AttachmentName
+            Optional custom name for the attached file. If not specified, uses the original filename.
+
+        .EXAMPLE
+            Send-GraphMailMessage -Subject "Test Email" -Content "Hello World"
+            Sends a simple HTML email with default sender and recipient.
+
+        .EXAMPLE
+            Send-GraphMailMessage `
+                -Subject "Device Setup Complete: $ENV:COMPUTERNAME" ` `
+                -Content "<h1>Report Ready</h1><p>The monthly report is attached.</p>" `
+                -ToAddress "user@domain.com" `
+                -AttachmentPath "C:\Reports\monthly.pdf"
+            Sends an HTML email with an attachment.
+
+        .EXAMPLE
+            Send-GraphMailMessage `
+                -Subject "Team Update" `
+                -Content "Weekly update attached" `
+                -ToAddress "manager@domain.com" `
+                -CcAddress @("team1@domain.com", "team2@domain.com") `
+                -ContentType "Text" `
+                -AttachmentPath "C:\Updates\weekly.docx"
+            Sends a plain text email with CC recipients and an attachment.
+
+        .EXAMPLE
+            Send-GraphMailMessage `
+                -Subject "Device Setup Complete: $ENV:COMPUTERNAME" `
+                -Content "The device $ENV:COMPUTERNAME has completed configuration" `
+                -ToAddress "cwooden@compassmsp.com" `
+                -CcAddress "cwilliams@compassmsp.com" `
+                -AttachmentPath "C:\Logs\setup.log" `
+                -AttachmentName "SetupLog.txt"
+            Example usage with attachment
+        #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Subject,
+
+        [Parameter(Mandatory)]
+        [string]$Content,
+
+        [Parameter()]
+        [string]$FromAddress,
+
+        [Parameter()]
+        $ToAddress,
+
+        [Parameter()]
+        $CcAddress,
+
+        [Parameter()]
+        [ValidateSet('HTML', 'Text')]
+        [string]$ContentType = 'HTML',
+
+        [Parameter()]
+        [string]$AttachmentPath,
+
+        [Parameter()]
+        [string]$AttachmentName
+    )
+
+    try {
+        # Validate required email addresses
+        if ([string]::IsNullOrWhiteSpace($FromAddress)) {
+            throw "FromAddress cannot be empty"
+        }
+        if (-not $ToAddress) {
+            throw "ToAddress cannot be empty"
+        }
+
+        # If in test mode, override the ToAddress
+        if ($script:TestMode) {
+            Write-StatusMessage -Message "TEST MODE: Redirecting email to $script:TestEmailAddress" -Type WARN
+            $ToAddress = $script:TestEmailAddress
+            $CcAddress = @() # Clear CC in test mode
+        }
+
+        # Normalize any address input into Graph recipient objects.
+        # Handles: single string, comma/semicolon-separated string, array, or any mix.
+        $normalizeAddresses = {
+            param($Addresses)
+            @(
+                @($Addresses) |
+                    Where-Object { $_ } |
+                    ForEach-Object { $_ -split '[,;]' } |
+                    ForEach-Object { $_.Trim() } |
+                    Where-Object { $_ } |
+                    ForEach-Object { @{ emailAddress = @{ address = $_ } } }
+            )
+        }
+
+        [array]$toRecipients = & $normalizeAddresses $ToAddress
+        if (-not $toRecipients) {
+            throw "ToAddress must contain at least one valid email address."
+        }
+
+        $messageParams = @{
+            message         = @{
+                subject      = $Subject
+                body         = @{
+                    contentType = $ContentType
+                    content     = $Content
+                }
+                toRecipients = $toRecipients
+            }
+            saveToSentItems = $false
+        }
+
+        # Add CC recipients if specified
+        if ($CcAddress) {
+            [array]$ccRecipients = & $normalizeAddresses $CcAddress
+            if ($ccRecipients) {
+                $messageParams.message['ccRecipients'] = $ccRecipients
+            }
+        }
+
+        # Add attachment if specified
+        if ($AttachmentPath) {
+            $attachmentBase64 = [System.Convert]::ToBase64String(
+                [System.IO.File]::ReadAllBytes($AttachmentPath)
+            )
+            $mimeType = switch ([System.IO.Path]::GetExtension($AttachmentPath).TrimStart('.').ToLower()) {
+                'pdf'  { 'application/pdf' }
+                'docx' { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }
+                'xlsx' { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+                'csv'  { 'text/csv' }
+                'html' { 'text/html' }
+                'json' { 'application/json' }
+                'zip'  { 'application/zip' }
+                { $_ -in 'log', 'txt' } { 'text/plain' }
+                default { 'application/octet-stream' }
+            }
+
+            $messageParams.message['attachments'] = @(
+                @{
+                    '@odata.type' = '#microsoft.graph.fileAttachment'
+                    name          = $AttachmentName ?? [System.IO.Path]::GetFileName($AttachmentPath)
+                    contentType   = $mimeType
+                    contentBytes  = $attachmentBase64
+                }
+            )
+        }
+
+        $jsonBody = $messageParams | ConvertTo-Json -Depth 10 -Compress
+        $graphUri = "https://graph.microsoft.com/v1.0/users/$FromAddress/sendMail"
+        Invoke-RestMethod -Method POST -Uri $graphUri -Headers $script:GraphHeaders -Body $jsonBody -ContentType "application/json" | Out-Null
+        Write-StatusMessage -Message "Email notification sent successfully" -Type OK
+    } catch {
+        Write-StatusMessage -Message "Failed to send email notification: $_" -Type ERROR
+    }
+}
+
+function Write-ProgressStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$StepName
+    )
+
+    # Find the step object by name
+    $step = $progressSteps | Where-Object { $_.Name -eq $StepName }
+
+    if (-not $step) {
+        Write-Warning "Progress step '$StepName' not found."
+        return
+    }
+
+    $stepNumber = $script:currentStep
+    $status = $step.Description
+
+    # Guard against division by zero or missing values
+    if ($null -eq $stepNumber -or $script:totalSteps -eq 0) {
+        Write-StatusMessage -Message "Step $StepName - $status" -Type INFO
+        Write-Progress -Activity "New User Creation" -Status $status
+    } else {
+        Write-StatusMessage -Message "Step $stepNumber of $script:totalSteps : $StepName - $status" -Type INFO
+        Write-Progress -Activity "New User Creation" -Status $status -PercentComplete (($stepNumber / $script:totalSteps) * 100)
+    }
+    $script:currentStep += 1
+}
+
+function Write-StatusMessage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('INFO', 'OK', 'ERROR', 'WARN', 'SUMMARY')]
+        [string]$Type = 'INFO'
+    )
+
+    $config = @{
+        'INFO'    = @{ Status = 'INFO'; Color = 'White' }
+        'OK'      = @{ Status = 'OK'; Color = 'Green' }
+        'ERROR'   = @{ Status = 'ERROR'; Color = 'Red' }
+        'WARN'    = @{ Status = 'WARN'; Color = 'Yellow' }
+        'SUMMARY' = @{ Status = ''; Color = 'Cyan' }
+    }
+
+    try {
+        if ($Type -eq 'SUMMARY') {
+            Write-Host $Message -ForegroundColor $config[$Type].Color
+        } else {
+            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $statusPadded = $config[$Type].Status.PadRight(7)
+            Write-Host "[$timestamp] [$statusPadded] $Message" -ForegroundColor $config[$Type].Color
+        }
+    } catch {
+        Write-Host "Failed to write status message: $_" -ForegroundColor Red
+    }
+}
+
+
+#region Custom Functions
+
+# License Helper Functions
+function Get-LicenseDisplayName {
+    param ([string]$SkuPartNumber)
+    $displayName = switch -Exact ($SkuPartNumber) {
+        'MCOPSTNC' { 'Communications Credits' }
+        'PROJECT_MADEIRA_PREVIEW_IW_SKU' { 'Dynamics 365 Business Central for IWs' }
+        'EXCHANGESTANDARD' { 'Exchange Online (Plan 1)' }
+        'FLOW_FREE' { 'Microsoft Power Automate Free' }
+        'MICROSOFT_BUSINESS_CENTER' { 'Microsoft Business Center' }
+        'Microsoft_Copilot_for_Finance_trial' { 'Microsoft Copilot for Finance trial' }
+        'Microsoft365_Lighthouse' { 'Microsoft 365 Lighthouse' }
+        'MCOMEETADV' { 'Microsoft 365 Audio Conferencing' }
+        'Microsoft_365_Copilot' { 'Microsoft 365 Copilot' }
+        'O365_BUSINESS_ESSENTIALS' { 'Microsoft 365 Business Basic' }
+        'SPB' { 'Microsoft 365 Business Premium' }
+        'SPE_E3' { 'Microsoft 365 E3' }
+        'SPE_E5' { 'Microsoft 365 E5' }
+        'Microsoft_365_ Business_ Premium_(no Teams)' { 'Microsoft 365 Business Premium (No Teams)' }
+        'Microsoft_365_E3_(no_Teams)' { 'Microsoft 365 E3 (No Teams)' }
+        'Microsoft_365_E5_(no_Teams)' { 'Microsoft 365 E5 (No Teams)' }
+        'AAD_PREMIUM_P2' { 'Microsoft Entra ID P2' }
+        'POWERAPPS_DEV' { 'Microsoft PowerApps for Developer' }
+        'POWERAPPS_VIRAL' { 'Microsoft Power Apps Plan 2 Trial' }
+        'Microsoft_Teams_Audio_Conferencing_select_dial_out' { 'Microsoft Teams Audio Conferencing with dial-out' }
+        'Microsoft_Teams_Premium' { 'Microsoft Teams Premium' }
+        'Microsoft_Teams_Enterprise_New' { 'Microsoft Teams Enterprise' }
+        'MCOEV' { 'Microsoft Teams Phone Standard' }
+        'PHONESYSTEM_VIRTUALUSER' { 'Microsoft Teams Phone Resource Account' }
+        'MEETING_ROOM' { 'Microsoft Teams Rooms Standard' }
+        'ENTERPRISEPACK' { 'Office 365 E3' }
+        'POWERAPPS_PER_USER' { 'Power Apps Premium' }
+        'POWERAUTOMATE_ATTENDED_RPA' { 'Power Automate Premium' }
+        'PBI_PREMIUM_PER_USER' { 'Power BI Premium' }
+        'POWER_BI_PRO' { 'Power BI Pro' }
+        'POWER_BI_STANDARD' { 'Power BI Standard' }
+        'CCIBOTS_PRIVPREV_VIRAL' { 'Power Virtual Agents Viral Trial' }
+        'PROJECT_P1' { 'Project Plan 1' }
+        'PROJECTPREMIUM' { 'Project Premium' }
+        'PROJECTPROFESSIONAL' { 'Project Plan 3' }
+        'PROJECT_PLAN3_DEPT' { 'Project Plan 3 (for Department)' }
+        'RIGHTSMANAGEMENT_ADHOC' { 'Rights Management Adhoc' }
+        'RMSBASIC' { 'Rights Management Service Basic Content Protection' }
+        'SHAREPOINTSTORAGE' { 'SharePoint Storage' }
+        'MCOPSTN1' { 'Skype for Business PSTN Domestic Calling' }
+        'Teams_Premium_(for_Departments)' { 'Teams Premium (for Departments)' }
+        'VISIOCLIENT' { 'Visio Plan 2' }
+        'WINDOWS_STORE' { 'Windows Store for Business' }
+        default { $SkuPartNumber }
+    }
+    return $displayName
+}
+
+function Get-FormattedLicenseInfo {
+    param (
+        [array]$Skus,
+        [array]$IgnoredLicenses = @(
+            "Communications Credits",
+            "Dynamics 365 Business Central for IWs",
+            "Microsoft 365 Copilot",
+            "Microsoft 365 Lighthouse",
+            "Microsoft Business Center",
+            "Microsoft Copilot for Finance trial",
+            "Microsoft Power Apps Plan 2 Trial",
+            "Microsoft Power Automate Free",
+            "Microsoft PowerApps for Developer",
+            "Microsoft Teams Phone Resource Account",
+            "Microsoft Teams Rooms Standard",
+            "Power Apps Premium",
+            "Power Automate Premium",
+            "Power Virtual Agents Viral Trial",
+            "Project Plan 3 (for Department)",
+            "Rights Management Adhoc",
+            "Rights Management Service Basic Content Protection",
+            "STREAM",
+            "SharePoint Storage",
+            "Skype for Business PSTN Domestic Calling",
+            "Teams Premium (for Departments)",
+            "Microsoft_Teams_Exploratory_Dept",
+            "Windows Store for Business",
+            "Microsoft_Teams_Rooms_Pro_without_Audio_Conferencing",
+            "Power_Automate_per_process",
+            "MICROSOFT_AGENT_FRONTIER_NO_TEAMS",
+            "Power_Pages_vTrial_for_Makers"
+        )
+    )
+    return $Skus | ForEach-Object {
+        $available = $_.PrepaidUnits - $_.ConsumedUnits
+        $SkuDisplayName = Get-LicenseDisplayName $_.SkuPartNumber
+        if ([string]::IsNullOrEmpty($SkuDisplayName)) {
+            $SkuDisplayName = $_.SkuPartNumber
+        }
+
+        # Skip if license is in ignored list
+        if ($IgnoredLicenses -notcontains $SkuDisplayName) {
+            @{
+                DisplayName = "$($SkuDisplayName) (Available: $available)"
+                SkuId       = $_.SkuId
+                SortName    = $SkuDisplayName
+            }
+        }
+    } | Where-Object { $_ -ne $null } | Sort-Object { $_.SortName }
+}
+
+# UI Functions
+function Show-CustomAlert {
+    param (
+        [string]$Message,
+        [ValidateSet("Error", "Warning", "Info", "Success")]
+        [string]$AlertType = "Error",
+        [string]$Title,
+        [string]$DefaultValue,
+        $Owner
+    )
+
+    if (-not $Title) { $Title = $AlertType }
+
+    Add-Type -AssemblyName PresentationFramework
+
+    switch ($AlertType) {
+        "Error" { $color = "#E81123"; $sound = [System.Media.SystemSounds]::Hand }
+        "Warning" { $color = "#FFB900"; $sound = [System.Media.SystemSounds]::Exclamation }
+        "Info" { $color = "#0078D7"; $sound = [System.Media.SystemSounds]::Asterisk }
+        "Success" { $color = "#107C10"; $sound = [System.Media.SystemSounds]::Beep }
+    }
+
+    $inputMode = $PSBoundParameters.ContainsKey('DefaultValue')
+
+    if ($inputMode) {
+        [xml]$XAML = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" Height="190" Width="530"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <Style TargetType="TextBlock">
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="FontSize" Value="14"/>
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Border Name="DragArea" CornerRadius="12" Background="#2D2D30" Padding="10" BorderBrush="$color" BorderThickness="2">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="1" Margin="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Viewbox Grid.Row="0" Grid.RowSpan="3" Margin="0,0,15,0" Width="40" Height="40" VerticalAlignment="Top">
+                    <Canvas Width="48" Height="48">
+                        <Ellipse Width="48" Height="48" Fill="$color"/>
+                        <Rectangle Width="6" Height="20" Fill="White" Canvas.Left="21" Canvas.Top="10"/>
+                        <Rectangle Width="6" Height="6" Fill="White" Canvas.Left="21" Canvas.Top="34"/>
+                    </Canvas>
+                </Viewbox>
+                <TextBlock x:Name="PromptLabel" Grid.Column="1" Grid.Row="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,5"/>
+                <TextBox x:Name="InputBox" Grid.Column="1" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,5,0,10"/>
+                <Button x:Name="OkButton" Grid.Column="1" Grid.Row="2" Width="75" Margin="5" IsDefault="True" Content="OK" HorizontalAlignment="Right"/>
+                <Button x:Name="CancelButton" Grid.Column="2" Grid.Row="2" Width="75" Margin="5" IsCancel="True" Content="Cancel" HorizontalAlignment="Left"/>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
+"@
+        $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $XAML))
+        $window.Title = $Title
+        if ($Owner) { $window.Owner = $Owner; $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner }
+
+        $promptLabel = $window.FindName("PromptLabel")
+        $inputBox = $window.FindName("InputBox")
+        $okButton = $window.FindName("OkButton")
+        $cancelButton = $window.FindName("CancelButton")
+
+        $promptLabel.Text = $Message
+        $inputBox.Text = $DefaultValue
+
+        $okButton.Add_Click({
+                if ($inputBox.Text -eq $DefaultValue) {
+                    Show-CustomAlert -Message "You must change the existing value: '$DefaultValue'" -Owner $window
+                    return
+                }
+                $window.DialogResult = $true
+                $window.Close()
+            })
+        $cancelButton.Add_Click({
+                $window.DialogResult = $false
+                $window.Close()
+            })
+
+        $dragArea = $window.FindName("DragArea")
+        $dragArea.Add_MouseLeftButtonDown({
+                param($s, $e)
+                [System.Windows.Window]::GetWindow($s).DragMove()
+            })
+
+        $sound.Play()
+        if ($window.ShowDialog() -eq $true) { return $inputBox.Text }
+        return $null
+
+    } else {
+        $XAML = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" Height="110" Width="400"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <Style TargetType="TextBlock">
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="FontSize" Value="14"/>
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Border Name="DragArea" CornerRadius="12" Background="#2D2D30" Padding="15" BorderBrush="$color" BorderThickness="2">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Viewbox Grid.Row="0" Grid.RowSpan="2" Margin="0,0,15,0" Width="40" Height="40" VerticalAlignment="Top">
+                    <Canvas Width="48" Height="48">
+                        <Ellipse Width="48" Height="48" Fill="$color"/>
+                        <Rectangle Width="6" Height="20" Fill="White" Canvas.Left="21" Canvas.Top="10"/>
+                        <Rectangle Width="6" Height="6" Fill="White" Canvas.Left="21" Canvas.Top="34"/>
+                    </Canvas>
+                </Viewbox>
+                <TextBlock Grid.Column="1" Grid.Row="0" TextWrapping="Wrap" Text="$Message" Margin="0,0,0,10"/>
+                <Button Name="OkButton" Grid.Column="1" Grid.Row="1" Content="OK" Width="80" HorizontalAlignment="Right" IsDefault="True"/>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
+"@
+        $stringReader = New-Object System.IO.StringReader $XAML
+        $xmlReader = [System.Xml.XmlReader]::Create($stringReader)
+        $window = [Windows.Markup.XamlReader]::Load($xmlReader)
+        if ($Owner) { $window.Owner = $Owner; $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner }
+
+        $okButton = $window.FindName("OkButton")
+        $okButton.Add_Click({ $window.Close() })
+
+        $dragArea = $window.FindName("DragArea")
+        $dragArea.Add_MouseLeftButtonDown({
+                param($s, $e)
+                [System.Windows.Window]::GetWindow($s).DragMove()
+            })
+
+        $sound.Play()
+        $window.ShowDialog() | Out-Null
+    }
+}
+
+function Show-ConfirmDialog {
+    param (
+        [string]$Message
+    )
+
+    Add-Type -AssemblyName PresentationFramework
+
+    [xml]$XAML = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ConnectWise SSO Confirmation" Height="200" Width="530"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <Style TargetType="TextBlock">
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="FontSize" Value="14"/>
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Border Name="DragArea" CornerRadius="12" Background="#2D2D30" Padding="15" BorderBrush="#0078D7" BorderThickness="2">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Viewbox Margin="0,0,15,0" Width="40" Height="40" VerticalAlignment="Top">
+                    <Canvas Width="48" Height="48">
+                        <Ellipse Width="48" Height="48" Fill="#0078D7"/>
+                        <Rectangle Width="6" Height="20" Fill="White" Canvas.Left="21" Canvas.Top="10"/>
+                        <Rectangle Width="6" Height="6" Fill="White" Canvas.Left="21" Canvas.Top="34"/>
+                    </Canvas>
+                </Viewbox>
+                <TextBlock x:Name="MessageText" Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </Grid>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                <Button x:Name="AcceptButton" Content="Accept" Width="85" Margin="5" IsDefault="True"/>
+                <Button x:Name="RetryButton" Content="Retry" Width="85" Margin="5"/>
+                <Button x:Name="CancelButton" Content="Cancel" Width="85" Margin="5" IsCancel="True"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+"@
+
+    $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $XAML))
+    $window.FindName("MessageText").Text = $Message
+
+    $window.FindName("AcceptButton").Add_Click({ $script:ssoDialogResult = 'Accept'; $window.Close() })
+    $window.FindName("RetryButton").Add_Click({ $script:ssoDialogResult = 'Retry'; $window.Close() })
+    $window.FindName("CancelButton").Add_Click({ $script:ssoDialogResult = 'Cancel'; $window.Close() })
+
+    $window.FindName("DragArea").Add_MouseLeftButtonDown({
+            param($s, $e)
+            [System.Windows.Window]::GetWindow($s).DragMove()
+        })
+
+    [System.Media.SystemSounds]::Asterisk.Play()
+    $script:ssoDialogResult = 'Cancel'
+    $window.ShowDialog() | Out-Null
+    return $script:ssoDialogResult
+}
+
+function Show-OkCancelDialog {
+    param (
+        [string]$Title = "Confirm",
+        [string]$Message,
+        [string]$Note
+    )
+
+    Add-Type -AssemblyName PresentationFramework
+
+    [xml]$XAML = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" Height="220" Width="530"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Border Name="DragArea" CornerRadius="12" Background="#2D2D30" Padding="15" BorderBrush="#0078D7" BorderThickness="2">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Viewbox Margin="0,0,15,0" Width="40" Height="40" VerticalAlignment="Top">
+                    <Canvas Width="48" Height="48">
+                        <Ellipse Width="48" Height="48" Fill="#0078D7"/>
+                        <Rectangle Width="6" Height="20" Fill="White" Canvas.Left="21" Canvas.Top="10"/>
+                        <Rectangle Width="6" Height="6" Fill="White" Canvas.Left="21" Canvas.Top="34"/>
+                    </Canvas>
+                </Viewbox>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="MessageText" TextWrapping="Wrap" Foreground="White" FontSize="14"/>
+                    <Rectangle Height="1" Fill="#444444" Margin="0,10,0,10" x:Name="NoteSeparator" Visibility="Collapsed"/>
+                    <TextBlock x:Name="NoteText" TextWrapping="Wrap" Foreground="#FFB900" FontSize="12" Visibility="Collapsed"/>
+                </StackPanel>
+            </Grid>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                <Button x:Name="OkButton" Content="Ok" Width="85" Margin="5" IsDefault="True"/>
+                <Button x:Name="CancelButton" Content="Cancel" Width="85" Margin="5" IsCancel="True"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+"@
+
+    $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $XAML))
+    $window.FindName("MessageText").Text = $Message
+
+    if ($Note) {
+        $window.FindName("NoteText").Text = $Note
+        $window.FindName("NoteText").Visibility = 'Visible'
+        $window.FindName("NoteSeparator").Visibility = 'Visible'
+    }
+
+    $script:okCancelResult = $false
+    $window.FindName("OkButton").Add_Click({ $script:okCancelResult = $true; $window.Close() })
+    $window.FindName("CancelButton").Add_Click({ $script:okCancelResult = $false; $window.Close() })
+    $window.FindName("DragArea").Add_MouseLeftButtonDown({
+            param($s, $e)
+            [System.Windows.Window]::GetWindow($s).DragMove()
+        })
+
+    [System.Media.SystemSounds]::Asterisk.Play()
+    $window.ShowDialog() | Out-Null
+    return $script:okCancelResult
+}
+
+function Get-NewUserRequest {
+    #region Assembly and Namespace loading
+    Add-Type -AssemblyName PresentationFramework
+    Add-Type -AssemblyName PresentationCore
+    Add-Type -AssemblyName WindowsBase
+    Add-Type -AssemblyName System.Windows.Forms
+
+    #region XAML Design
+    [xml]$XAML = @"
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="User Creation Form" Height="800" Width="820"
+    WindowStartupLocation="CenterScreen">
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="User Creation Form" FontSize="24" FontWeight="SemiBold" Margin="0,0,0,20"/>
+            <Border Background="{DynamicResource TextControlBackgroundPointerOver}"
+                    BorderBrush="{DynamicResource TextControlBorderBrush}"
+                    BorderThickness="1"
+                    Padding="10"
+                    Margin="0,0,0,20">
+                <TextBlock TextWrapping="Wrap">
+                    Please fill in the required information for the new user. Fields marked with * are required.
+                </TextBlock>
+            </Border>
+            <WrapPanel Margin="0,0,0,20">
+                <Button x:Name="btnLocalFromHibob" Content="Load from HiBob" Style="{DynamicResource AccentButtonStyle}" Width="120" Height="32" Margin="0,0,10,0"/>
+                <Button x:Name="btnRefreshLicenses" Content="Refresh Licenses" Width="120" Height="32" Margin="0,0,10,0"/>
+                <CheckBox x:Name="cbInstallSapience" Content="Install Sapience" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </WrapPanel>
+        </StackPanel>
+
+        <!-- Main Content -->
+        <TabControl Grid.Row="1" Margin="0,10">
+            <!-- User Information Tab -->
+            <TabItem Header="User Information">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,10" Padding="0,0,20,0">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Left Column -->
+                            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                                <Label>
+                                    <TextBlock>
+                                        <Run Text="Required License"/>
+                                        <Run Text=" *" Foreground="Red"/>
+                                    </TextBlock>
+                                </Label>
+                                <ComboBox x:Name="cboRequiredLicense" Height="32" Margin="0,0,0,15"/>
+
+                                <Label>
+                                    <TextBlock>
+                                        <Run Text="Display Name"/>
+                                        <Run Text=" *" Foreground="Red"/>
+                                    </TextBlock>
+                                </Label>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtDisplayName" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter full name (First Last)"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtDisplayName}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Email Address"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+                                    <Grid Width="150">
+                                        <TextBox x:Name="txtSamAccountName" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                        <TextBlock IsHitTestVisible="False"
+                                                 Text="Username"
+                                                 VerticalAlignment="Center"
+                                                 Margin="8,0,0,0"
+                                                 Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                            <TextBlock.Style>
+                                                <Style TargetType="{x:Type TextBlock}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Text, ElementName=txtSamAccountName}" Value="">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                    </TextBlock>
+                                    </Grid>
+                                    <TextBlock Text="@" VerticalAlignment="Center" Margin="5,0" Padding="0,5,0,0"/>
+                                    <ComboBox x:Name="cboDomain" Width="150" Height="32" VerticalAlignment="Center"/>
+                                    <Button x:Name="btnRefreshDomains" Content="⟳" Width="32" Height="32" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                                </StackPanel>
+
+                                <Label Content="Mobile Phone"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtMobilePhone" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter mobile phone number"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtMobilePhone}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Time Zone"/>
+                                <ComboBox x:Name="cboTimeZone" Height="32" Margin="0,0,0,15"/>
+
+                                <Label Content="Employee Hire Date"/>
+                                <DatePicker x:Name="dateEmployeeHireDate" Height="32" Margin="0,0,0,15"/>
+                            </StackPanel>
+
+                            <!-- Right Column -->
+                            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                <Label Content="Copy User Operations"/>
+                                <ComboBox x:Name="cboCopyUserOperations" Height="32" Margin="0,0,0,15"/>
+
+                                <Label Content="User To Copy"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtUserToCopy" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter email of user to copy"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtUserToCopy}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Ancillary Licenses (Multiple Selection)"/>
+                                <ListBox x:Name="lstAncillaryLicenses"
+                                    SelectionMode="Multiple"
+                                        MinHeight="100"
+                                        MaxHeight="270"
+                                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                        Margin="0,0,0,15"/>
+
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Employee Information Tab -->
+            <TabItem Header="Employee Information">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,10" Padding="0,0,20,0">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Left Column -->
+                            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                                <Label Content="First Name"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtGivenName" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter first name"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtGivenName}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Job Title"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtJobTitle" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter job title"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtJobTitle}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Company Name"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtCompanyName" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter company name"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtCompanyName}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Business Phone"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtBusinessPhone" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter business phone number"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtBusinessPhone}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Employee ID"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtEmployeeId" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter employee ID"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtEmployeeId}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="365 Usage Location"/>
+                                <ComboBox x:Name="cboUsageLocation" Height="32" Margin="0,0,0,15"/>
+                            </StackPanel>
+
+                            <!-- Right Column -->
+                            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                <Label Content="Last Name"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtSurname" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter last name"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtSurname}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Department"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtDepartment" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter department name"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtDepartment}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Sub Department (Office Location)"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtOfficeLocation" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter sub department"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtOfficeLocation}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Fax Number"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtFaxNumber" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter fax number"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtFaxNumber}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="Manager"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtManager" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter manager's email"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtManager}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+
+                                <Label Content="People Ops Partner"/>
+                                <Grid Margin="0,0,0,15">
+                                    <TextBox x:Name="txtPeopleOpsPartner" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                                    <TextBlock IsHitTestVisible="False"
+                                             Text="Enter People Ops Partner name"
+                                             VerticalAlignment="Center"
+                                             Margin="8,0,0,0"
+                                             Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=txtPeopleOpsPartner}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Location Information Tab -->
+            <TabItem Header="Location Information">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,10" Padding="0,0,20,0">
+                    <StackPanel>
+                        <Label Content="Street Address"/>
+                        <Grid Margin="0,0,0,15">
+                            <TextBox x:Name="txtStreetAddress" Height="64" Padding="8,5,8,5" TextWrapping="Wrap" AcceptsReturn="True" VerticalContentAlignment="Top"/>
+                            <TextBlock IsHitTestVisible="False"
+                                     Text="Enter street address"
+                                     VerticalAlignment="Top"
+                                     Margin="8,5,0,0"
+                                     Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=txtStreetAddress}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+
+                        <Label Content="City"/>
+                        <Grid Margin="0,0,0,15">
+                            <TextBox x:Name="txtCity" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                            <TextBlock IsHitTestVisible="False"
+                                     Text="Enter city"
+                                     VerticalAlignment="Center"
+                                     Margin="8,0,0,0"
+                                     Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=txtCity}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+
+                        <Label Content="State"/>
+                        <Grid Margin="0,0,0,15">
+                            <TextBox x:Name="txtState" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                            <TextBlock IsHitTestVisible="False"
+                                     Text="Enter state"
+                                     VerticalAlignment="Center"
+                                     Margin="8,0,0,0"
+                                     Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=txtState}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+
+                        <Label Content="Postal Code"/>
+                        <Grid Margin="0,0,0,15">
+                            <TextBox x:Name="txtPostalCode" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                            <TextBlock IsHitTestVisible="False"
+                                     Text="Enter postal code"
+                                     VerticalAlignment="Center"
+                                     Margin="8,0,0,0"
+                                     Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=txtPostalCode}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+
+                        <Label Content="Country"/>
+                        <Grid Margin="0,0,0,15">
+                            <TextBox x:Name="txtCountry" Height="32" Padding="8,5,8,5" VerticalContentAlignment="Center"/>
+                            <TextBlock IsHitTestVisible="False"
+                                     Text="Enter country"
+                                     VerticalAlignment="Center"
+                                     Margin="8,0,0,0"
+                                     Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=txtCountry}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Dev Tools Tab -->
+            <TabItem Header="Dev Tools">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,10" Padding="0,0,20,0">
+                    <StackPanel Margin="10">
+                        <TextBlock Text="Developer Tools" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,15"/>
+                        <WrapPanel Margin="0,0,0,20">
+                            <Button x:Name="btnLoadJson" Content="Load JSON" Width="120" Height="32" Margin="0,0,10,0"/>
+                            <Button x:Name="btnSaveJson" Content="Save JSON" Width="120" Height="32" Margin="0,0,10,0"/>
+                        </WrapPanel>
+                        <CheckBox x:Name="cbTestMode" Content="Test Mode" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                        <CheckBox x:Name="cbDisableSending8x8ProvisioningTicket" Content="Disable Sending 8x8 Provisioning Ticket" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <!-- Footer -->
+        <Border Grid.Row="2"
+                BorderBrush="{DynamicResource TextControlBorderBrush}"
+                BorderThickness="0,1,0,0"
+                Background="{DynamicResource TextControlBackgroundPointerOver}"
+                Padding="20">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock x:Name="tbStatus" Grid.Column="1" VerticalAlignment="Center" Margin="20,0"/>
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button x:Name="btnSubmit" Content="Submit" Style="{DynamicResource AccentButtonStyle}" Padding="20,5" Height="32" Margin="0,0,10,0"/>
+                    <Button x:Name="btnReset" Content="Reset" Padding="20,5" Height="32" Margin="0,0,10,0"/>
+                    <Button x:Name="btnCancel" Content="Cancel" Padding="20,5" Height="32"/>
+        </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+"@
+
+    # Parse the XAML
+    $XAMLReader = [System.Xml.XmlNodeReader]::new($XAML)
+    $Window = [Windows.Markup.XamlReader]::Load($XAMLReader)
+
+    # Create namespace manager for XPath queries
+    $nsManager = New-Object System.Xml.XmlNamespaceManager($XAML.NameTable)
+    $nsManager.AddNamespace("x", "http://schemas.microsoft.com/winfx/2006/xaml")
+
+    # Get all form controls by name and create variables
+    $XAML.SelectNodes("//*[@x:Name]", $nsManager) | ForEach-Object {
+        $Name = $_.Name
+        $Variable = New-Variable -Name $Name -Value $Window.FindName($Name) -Force
+    }
+
+    # Function to load JSON data
+    function Invoke-LoadJsonFile {
+        $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+        $openFileDialog.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        $openFileDialog.Title = "Select a JSON file"
+
+        if ($openFileDialog.ShowDialog() -eq "OK") {
+            try {
+                $jsonContent = Get-Content -Path $openFileDialog.FileName -Raw | ConvertFrom-Json
+
+                # Set the required license
+                if ($jsonContent.requiredLicense) {
+                    foreach ($item in $cboRequiredLicense.Items) {
+                        $itemText = $item.Content.ToString() -replace '\s+\(Available:.*?\)', ''
+                        if ($itemText -eq $jsonContent.requiredLicense) {
+                            $cboRequiredLicense.SelectedItem = $item
+                            break
+                        }
+                    }
+                }
+
+                # Set ancillary licenses (multi-select)
+                $ancillaryLicenseData = if ($jsonContent.ancillaryLicense) { $jsonContent.ancillaryLicense }
+
+                if ($ancillaryLicenseData) {
+                    # Convert input to array regardless of type
+                    $licenses = @()
+                    if ($ancillaryLicenseData -is [string]) {
+                        # If it's a single string, split by comma if it contains commas, otherwise use as is
+                        if ($ancillaryLicenseData -match ',') {
+                            $licenses = $ancillaryLicenseData -split ',' | ForEach-Object { $_.Trim() }
+                        } else {
+                            $licenses = @($ancillaryLicenseData.Trim())
+                        }
+                    } elseif ($ancillaryLicenseData -is [array]) {
+                        # If it's already an array, use it directly
+                        $licenses = $ancillaryLicenseData
+                    }
+
+                    # Clear any existing selections
+                    $lstAncillaryLicenses.SelectedItems.Clear()
+
+                    # Process each license
+                    foreach ($license in $licenses) {
+                        $trimmedLicense = $license.Trim()
+                        for ($i = 0; $i -lt $lstAncillaryLicenses.Items.Count; $i++) {
+                            # Only strip the availability count from the ListBox items
+                            $itemText = $lstAncillaryLicenses.Items[$i].Content -replace '\s*\(Available:.*\)', ''
+
+                            # Compare the stripped ListBox item text with the JSON license name
+                            if ($itemText -eq $trimmedLicense) {
+                                $lstAncillaryLicenses.SelectedItems.Add($lstAncillaryLicenses.Items[$i])
+                                break
+                            }
+                        }
+                    }
+                }
+
+                # Set the employee hire date
+                if ($jsonContent.employeeHireDate -and $jsonContent.employeeHireDate -ne "") {
+                    try {
+                        $dateEmployeeHireDate.SelectedDate = [DateTime]::Parse($jsonContent.employeeHireDate)
+                    } catch {
+                        Write-StatusMessage "Failed to parse date: $($jsonContent.employeeHireDate)" -Type ERROR
+                    }
+                }
+
+                # Set copy user operations
+                if ($jsonContent.copyUserOperations) {
+                    foreach ($item in $cboCopyUserOperations.Items) {
+                        if ($item -eq $jsonContent.copyUserOperations) {
+                            $cboCopyUserOperations.SelectedItem = $item
+                            break
+                        }
+                    }
+                }
+
+                # Set the domain and username from userPrincipalName
+                if ($jsonContent.userPrincipalName -and $jsonContent.userPrincipalName -match '@') {
+                    $upnParts = $jsonContent.userPrincipalName -split '@'
+                    $txtSamAccountName.Text = $upnParts[0]
+
+                    # Try to set domain from either the domain field or from the UPN
+                    $domainToSet = if ($jsonContent.domain) { $jsonContent.domain } else { $upnParts[1] }
+                    foreach ($item in $cboDomain.Items) {
+                        if ($item.ToString() -eq $domainToSet) {
+                            $cboDomain.SelectedItem = $item
+                            break
+                        }
+                    }
+                } elseif ($jsonContent.domain) {
+                    # If no UPN but domain exists, try to set just the domain
+                    foreach ($item in $cboDomain.Items) {
+                        if ($item.ToString() -eq $jsonContent.domain) {
+                            $cboDomain.SelectedItem = $item
+                            break
+                        }
+                    }
+                }
+
+                # Populate the form fields with JSON data
+                $txtDisplayName.Text = $jsonContent.displayName
+                $txtSamAccountName.Text = $jsonContent.userPrincipalName.Split('@')[0]
+                $txtMobilePhone.Text = $jsonContent.mobilePhone
+                $cboTimeZone.SelectedItem = $jsonContent.timeZone
+                $txtUserToCopy.Text = $jsonContent.userToCopy
+                $txtGivenName.Text = $jsonContent.givenName
+                $txtSurname.Text = $jsonContent.surname
+                $txtJobTitle.Text = $jsonContent.jobTitle
+                $txtDepartment.Text = $jsonContent.department
+                $txtCompanyName.Text = $jsonContent.companyName
+                $txtOfficeLocation.Text = $jsonContent.officeLocation
+                $txtManager.Text = $jsonContent.manager
+                $txtBusinessPhone.Text = $jsonContent.businessPhone
+                $txtEmployeeId.Text = $jsonContent.employeeId
+                $txtFaxNumber.Text = $jsonContent.faxNumber
+                $txtStreetAddress.Text = $jsonContent.streetAddress
+                $txtCity.Text = $jsonContent.city
+                $txtState.Text = $jsonContent.state
+                $txtPostalCode.Text = $jsonContent.postalCode
+                $txtCountry.Text = $jsonContent.country
+                $cbInstallSapience.IsChecked = [bool]$jsonContent.installSapience
+
+                # Set department groups (multi-select) - DISABLED
+                if ($jsonContent.departmentGroupsDISABLED) {
+                    $groups = $jsonContent.departmentGroups -split ','
+                    foreach ($group in $groups) {
+                        $trimmedGroup = $group.Trim()
+                        for ($i = 0; $i -lt $lstDepartmentGroups.Items.Count; $i++) {
+                            if ($lstDepartmentGroups.Items[$i] -eq $trimmedGroup) {
+                                $lstDepartmentGroups.SelectedItems.Add($lstDepartmentGroups.Items[$i])
+                            }
+                        }
+                    }
+                }
+
+                Show-CustomAlert -Message "JSON file loaded successfully" -AlertType "Success" -Title "Success" -Owner $window
+            } catch {
+                Show-CustomAlert -Message "Error loading JSON file: $_" -AlertType "Error" -Title "Error" -Owner $window
+            }
+        }
+    }
+
+    # Function to save JSON data
+    function Save-JsonData {
+        # Get form data using the existing Get-FormData function
+        $formDataJSON = Get-FormData
+
+        if ($cboRequiredLicense.SelectedItem) {
+            $formDataJSON.requiredLicense = $cboRequiredLicense.SelectedItem.Content -replace '\s*\(Available:.*\)', ''
+        } else { "" }
+
+        # Get the ancillary licenses as an array of display names
+        $selectedAncillaryLicenses = @()
+        foreach ($item in $lstAncillaryLicenses.SelectedItems) {
+            # Strip out the (Available: X) part and add to array
+            $licenseName = $item.Content -replace '\s*\(Available:.*\)', ''
+            $selectedAncillaryLicenses += $licenseName
+        }
+
+        if ($selectedAncillaryLicenses -gt 0) {
+            $formDataJSON.ancillaryLicense = $selectedAncillaryLicenses
+        }
+
+        # Get the department groups as an array
+        if ($lstDepartmentGroups) {
+            $selectedDepartmentGroups = @()
+            foreach ($item in $lstDepartmentGroups.SelectedItems) {
+                $selectedDepartmentGroups += $item.Content
+            }
+        }
+
+        # Open save file dialog
+        $saveFileDialog = New-Object System.Windows.Forms.SaveFileDialog
+        $saveFileDialog.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        $saveFileDialog.Title = "Save JSON File"
+        $saveFileDialog.DefaultExt = "json"
+
+        if ($saveFileDialog.ShowDialog() -eq "OK") {
+            try {
+                $formDataJSON | ConvertTo-Json -Depth 5 | Set-Content -Path $saveFileDialog.FileName
+                Show-CustomAlert -Message "JSON file saved successfully" -AlertType "Success" -Title "Success" -Owner $window
+            } catch {
+                Show-CustomAlert -Message "Error saving JSON file: $_" -AlertType "Error" -Title "Error" -Owner $window
+            }
+        }
+    }
+
+    # Function to convert Input to JSON data
+    function Convert-ToUserJson {
+        param(
+            [string]$InputString
+        )
+
+        # Convert input string into a hashtable
+        $lines = $InputString -split "`n"
+        $data = @{}
+        foreach ($line in $lines) {
+            if ($line -match '^(.*?):\s*(.*)$') {
+                $key = $matches[1].Trim()
+                $value = $matches[2].Trim()
+                $data[$key] = $value
+            }
+        }
+
+        # Extract People Ops Partner name from HiBob footer line
+        $peopleOpsPartner = $null
+        foreach ($line in $lines) {
+            if ($line -match 'This email was sent by\s+(.+?)\.') {
+                $peopleOpsPartner = $matches[1].Trim()
+                break
+            }
+        }
+
+        # Fixed domain
+        $domain = "compassmsp.com"
+
+        # Extract samAccountName from Email Address
+        $email = $data['Email Address']
+        if (-not $email) { throw "Email Address is missing in input" }
+        $samAccountName = ($email -split '@')[0].Trim()
+
+        # Manager email comes directly from input
+        $managerEmail = $data['Hiring Manager']
+
+        # Process Start Date safely
+        $startDate = $null
+        if ($data['Start Date']) {
+            try { $startDate = (Get-Date $data['Start Date'].Trim() -Format "yyyy-MM-dd") }
+            catch { $startDate = $null }
+        }
+
+        # Build output object
+        $output = [PSCustomObject]@{
+            requiredLicense        = "Microsoft 365 Business Premium"
+            displayName            = "$($data['First Name']) $($data['Last Name'])"
+            samAccountName         = $samAccountName
+            domain                 = $domain
+            userPrincipalName      = "$samAccountName@$domain"
+            mobilePhone            = $data['Phone Number']
+            timeZone               = $data['Time Zone']
+            usageLocation          = "US"
+            copyUserOperations     = $data['Copy User Operations']
+            userToCopy             = $data['Permissions mirrored from']
+            ancillaryLicense       = @()
+            givenName              = $data['First Name']
+            surname                = $data['Last Name']
+            jobTitle               = $data['Job Title']
+            department             = $data['Department']
+            officeLocation         = $data['Sub Department']
+            companyName            = "CompassMSP"
+            employeeHireDate       = $startDate
+            manager                = $managerEmail
+            EmployeeId             = $data['EmployeeID']
+            businessPhone          = $null
+            faxNumber              = $null
+            streetAddress          = $null
+            city                   = $data['Site']
+            state                  = $null
+            postalCode             = $null
+            country                = $data['Country']
+            departmentGroupOptions = @()
+            InstallSapience        = $data['Sapience'] -eq 'Yes'
+            testModeEnabled        = $false
+            cloudOnly              = $true
+            peopleOpsPartner       = $peopleOpsPartner
+        }
+
+        # Convert to JSON
+        return $output | ConvertTo-Json -Depth 5
+    }
+
+    # Function to show HiBob data input popup
+    function Show-HiBobDataInput {
+        # Create popup window XAML
+        [xml]$PopupXAML = @"
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="HiBob Data Input" Height="500" Width="600"
+    WindowStartupLocation="CenterScreen"
+    ResizeMode="CanResize">
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="HiBob Data Input" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,10"/>
+            <Border Background="{DynamicResource TextControlBackgroundPointerOver}"
+                    BorderBrush="{DynamicResource TextControlBorderBrush}"
+                    BorderThickness="1"
+                    Padding="10"
+                    Margin="0,0,0,15">
+                <TextBlock TextWrapping="Wrap">
+                    Paste the HiBob employee data below. The format should be "Field Name: Value" on each line.
+                </TextBlock>
+            </Border>
+        </StackPanel>
+
+        <!-- Text Input Area -->
+        <Grid Grid.Row="1">
+            <TextBox x:Name="txtHiBobData"
+                     AcceptsReturn="True"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     Padding="10"/>
+            <TextBlock IsHitTestVisible="False"
+                       Text="Paste HiBob data here..."
+                       VerticalAlignment="Top"
+                       HorizontalAlignment="Left"
+                       Margin="15,10,0,0"
+                       Foreground="{DynamicResource TextControlPlaceholderForeground}">
+                <TextBlock.Style>
+                    <Style TargetType="{x:Type TextBlock}">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Text, ElementName=txtHiBobData}" Value="">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
+        </Grid>
+
+        <!-- Footer -->
+        <Border Grid.Row="2"
+                BorderBrush="{DynamicResource TextControlBorderBrush}"
+                BorderThickness="0,1,0,0"
+                Background="{DynamicResource TextControlBackgroundPointerOver}"
+                Padding="20">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnProcessHiBob" Content="Process Data" Style="{DynamicResource AccentButtonStyle}" Padding="20,5" Height="32" Margin="0,0,10,0"/>
+                <Button x:Name="btnCancelHiBob" Content="Cancel" Padding="20,5" Height="32"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
+"@
+
+        # Parse the popup XAML
+        $PopupReader = [System.Xml.XmlNodeReader]::new($PopupXAML)
+        $PopupWindow = [Windows.Markup.XamlReader]::Load($PopupReader)
+
+        # Get controls
+        $txtHiBobData = $PopupWindow.FindName("txtHiBobData")
+        $btnProcessHiBob = $PopupWindow.FindName("btnProcessHiBob")
+        $btnCancelHiBob = $PopupWindow.FindName("btnCancelHiBob")
+
+        # Add event handlers
+        $btnProcessHiBob.Add_Click({
+                try {
+                    $inputData = $txtHiBobData.Text.Trim()
+                    if ([string]::IsNullOrWhiteSpace($inputData)) {
+                        [System.Windows.MessageBox]::Show("Please enter HiBob data before processing.", "No Data", "OK", "Warning")
+                        return
+                    }
+
+                    # Convert HiBob data to JSON format
+                    $jsonData = Convert-ToUserJson -InputString $inputData
+                    $userData = $jsonData | ConvertFrom-Json
+
+                    # Populate the main form with the converted data
+                    Set-FormFromHiBobData -UserData $userData
+
+                    $PopupWindow.DialogResult = $true
+                    $PopupWindow.Close()
+                } catch {
+                    [System.Windows.MessageBox]::Show("Error processing HiBob data: $($_.Exception.Message)", "Processing Error", "OK", "Error")
+                }
+            })
+
+        $btnCancelHiBob.Add_Click({
+                $PopupWindow.DialogResult = $false
+                $PopupWindow.Close()
+            })
+
+        # Show the popup window
+        $result = $PopupWindow.ShowDialog()
+        return $result
+    }
+
+    # Function to populate form from HiBob data
+    function Set-FormFromHiBobData {
+        param($UserData)
+
+        try {
+            # Set the required license
+            if ($UserData.requiredLicense) {
+                foreach ($item in $cboRequiredLicense.Items) {
+                    $itemText = $item.Content.ToString() -replace '\s+\(Available:.*?\)', ''
+                    if ($itemText -eq $UserData.requiredLicense) {
+                        $cboRequiredLicense.SelectedItem = $item
+                        break
+                    }
+                }
+            }
+
+            # Set ancillary licenses (multi-select)
+            if ($UserData.ancillaryLicense -and $UserData.ancillaryLicense.Count -gt 0) {
+                $lstAncillaryLicenses.SelectedItems.Clear()
+                foreach ($license in $UserData.ancillaryLicense) {
+                    for ($i = 0; $i -lt $lstAncillaryLicenses.Items.Count; $i++) {
+                        $itemText = $lstAncillaryLicenses.Items[$i].Content -replace '\s*\(Available:.*\)', ''
+                        if ($itemText -eq $license) {
+                            $lstAncillaryLicenses.SelectedItems.Add($lstAncillaryLicenses.Items[$i])
+                            break
+                        }
+                    }
+                }
+            }
+
+            # Set the employee hire date
+            if ($UserData.employeeHireDate -and $UserData.employeeHireDate -ne "") {
+                try {
+                    $dateEmployeeHireDate.SelectedDate = [DateTime]::Parse($UserData.employeeHireDate)
+                } catch {
+                    Write-StatusMessage "Failed to parse date: $($UserData.employeeHireDate)" -Type ERROR
+                }
+            }
+
+            # Set copy user operations
+            if ($UserData.userToCopy) {
+                foreach ($item in $cboCopyUserOperations.Items) {
+                    $cboCopyUserOperations.SelectedItem = 'Copy Groups'
+                    break
+                }
+            } else {
+                foreach ($item in $cboCopyUserOperations.Items) {
+                    $cboCopyUserOperations.SelectedIndex = -1
+                    break
+                }
+            }
+
+            # Set the domain and username from userPrincipalName
+            if ($UserData.userPrincipalName -and $UserData.userPrincipalName -match '@') {
+                $upnParts = $UserData.userPrincipalName -split '@'
+                $txtSamAccountName.Text = $upnParts[0]
+
+                # Try to set domain from either the domain field or from the UPN
+                $domainToSet = if ($UserData.domain) { $UserData.domain } else { $upnParts[1] }
+                foreach ($item in $cboDomain.Items) {
+                    if ($item.ToString() -eq $domainToSet) {
+                        $cboDomain.SelectedItem = $item
+                        break
+                    }
+                }
+            } elseif ($UserData.domain) {
+                # If no UPN but domain exists, try to set just the domain
+                foreach ($item in $cboDomain.Items) {
+                    if ($item.ToString() -eq $UserData.domain) {
+                        $cboDomain.SelectedItem = $item
+                        break
+                    }
+                }
+            }
+
+            # Populate all form fields
+            $txtDisplayName.Text = $UserData.displayName
+            $txtMobilePhone.Text = $UserData.mobilePhone
+            $cboTimeZone.SelectedItem = $UserData.timeZone
+            $txtUserToCopy.Text = $UserData.userToCopy
+            $txtGivenName.Text = $UserData.givenName
+            $txtSurname.Text = $UserData.surname
+            $txtJobTitle.Text = $UserData.jobTitle
+            $txtDepartment.Text = $UserData.department
+            $txtCompanyName.Text = $UserData.companyName
+            $txtOfficeLocation.Text = $UserData.officeLocation
+            $txtFaxNumber.Text = $UserData.faxNumber
+            $txtManager.Text = $UserData.manager
+            $txtPeopleOpsPartner.Text = $UserData.peopleOpsPartner
+            $txtEmployeeId.Text = $UserData.employeeId
+            $txtBusinessPhone.Text = $UserData.businessPhone
+            $txtStreetAddress.Text = $UserData.streetAddress
+            $txtCity.Text = $UserData.city
+            $txtState.Text = $UserData.state
+            $txtPostalCode.Text = $UserData.postalCode
+            $txtCountry.Text = $UserData.country
+            $cbInstallSapience.IsChecked = [bool]$UserData.installSapience
+
+            # Set usage location
+            if ($UserData.usageLocation) {
+                $cboUsageLocation.SelectedItem = $UserData.usageLocation
+            }
+
+            Show-CustomAlert -Message "HiBob data loaded successfully" -AlertType "Success" -Title "Success" -Owner $window
+        } catch {
+            Show-CustomAlert -Message "Error populating form from HiBob data: $_" -AlertType "Error" -Title "Error" -Owner $window
+        }
+    }
+
+    # Function to reset the form
+    function Reset-Form {
+        $cboRequiredLicense.SelectedIndex = -1
+        $txtDisplayName.Text = ""
+        $txtSamAccountName.Text = ""
+        $txtMobilePhone.Text = ""
+        $cboTimeZone.SelectedIndex = -1
+        $cboCopyUserOperations.SelectedIndex = -1
+        $txtUserToCopy.Text = ""
+        $lstAncillaryLicenses.SelectedItems.Clear()
+        $txtGivenName.Text = ""
+        $txtSurname.Text = ""
+        $txtJobTitle.Text = ""
+        $txtDepartment.Text = ""
+        $txtOfficeLocation.Text = ""
+        $txtManager.Text = ""
+        $txtPeopleOpsPartner.Text = ""
+        $dateEmployeeHireDate.SelectedDate = $null
+        $txtCompanyName.Text = ""
+        $txtEmployeeId.Text = ""
+        $txtBusinessPhone.Text = ""
+        $txtFaxNumber.Text = ""
+        $txtStreetAddress.Text = ""
+        $txtCity.Text = ""
+        $txtState.Text = ""
+        $txtPostalCode.Text = ""
+        $txtCountry.Text = ""
+        $cbInstallSapience.IsChecked = $false
+        #$lstDepartmentGroups.SelectedItems.Clear()
+        Show-StatusMessage -Message "Form has been reset" -Type "Info"
+    }
+
+    # Function to get form data and store in variables
+    function Get-FormData {
+        # Helper function to return $null for empty strings
+        function Get-ValueOrNull($value) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $null
+            }
+            return $value.Trim()
+        }
+
+        # Determine usageLocation with priority: Country field > Remote City > ComboBox
+        $autoUsageLocation = Get-UsageLocationFromFields -CountryText $txtCountry.Text -CityText $txtCity.Text -CountryMap $CountryMap
+
+        if ($autoUsageLocation) {
+            $usageLocation = $autoUsageLocation
+        } elseif ($cboUsageLocation.SelectedValue) {
+            $usageLocation = $cboUsageLocation.SelectedValue
+        } else {
+            $usageLocation = ""
+        }
+
+        # Sync ComboBox to detected value
+        if ($usageLocation) {
+            $cboUsageLocation.SelectedValue = $usageLocation
+        }
+
+        # Store form data in a custom object
+        $formData = [PSCustomObject]@{
+            requiredLicense           = @()
+            displayName               = Get-ValueOrNull $txtDisplayName.Text
+            samAccountName            = Get-ValueOrNull $txtSamAccountName.Text
+            domain                    = if ($cboDomain.SelectedItem) { $cboDomain.SelectedItem.ToString() } else { "" }
+            userPrincipalName         = if ($txtSamAccountName.Text -and $cboDomain.SelectedItem) { "$($txtSamAccountName.Text)@$($cboDomain.SelectedItem)" } else { "" }
+            mobilePhone               = Get-ValueOrNull $txtMobilePhone.Text
+            timeZone                  = if ($cboTimeZone.SelectedItem) { $cboTimeZone.SelectedItem } else { $null }
+            usageLocation             = $usageLocation
+            copyUserOperations        = if ($cboCopyUserOperations.SelectedItem -eq 'None') { $null } elseif ($cboCopyUserOperations.SelectedItem) { $cboCopyUserOperations.SelectedItem } else { $null }
+            userToCopy                = Get-ValueOrNull $txtUserToCopy.Text
+            ancillaryLicense          = @()
+            givenName                 = Get-ValueOrNull $txtGivenName.Text
+            surname                   = Get-ValueOrNull $txtSurname.Text
+            jobTitle                  = Get-ValueOrNull $txtJobTitle.Text
+            department                = Get-ValueOrNull $txtDepartment.Text
+            companyName               = Get-ValueOrNull $txtCompanyName.Text
+            officeLocation            = Get-ValueOrNull $txtOfficeLocation.Text
+            employeeHireDate          = if ($dateEmployeeHireDate.SelectedDate) { $dateEmployeeHireDate.SelectedDate.ToString("yyyy-MM-dd") } else { $null }
+            manager                   = Get-ValueOrNull $txtManager.Text
+            peopleOpsPartner          = Get-ValueOrNull $txtPeopleOpsPartner.Text
+            employeeId                = Get-ValueOrNull $txtEmployeeId.Text
+            businessPhone             = Get-ValueOrNull $txtBusinessPhone.Text
+            faxNumber                 = Get-ValueOrNull $txtFaxNumber.Text
+            streetAddress             = Get-ValueOrNull $txtStreetAddress.Text
+            city                      = Get-ValueOrNull $txtCity.Text
+            state                     = Get-ValueOrNull $txtState.Text
+            postalCode                = Get-ValueOrNull $txtPostalCode.Text
+            country                   = Get-ValueOrNull $txtCountry.Text
+            departmentGroupOptions    = @()
+            testModeEnabled           = $false
+            Send8x8ProvisioningTicket = $false
+            InstallSapience           = $false
+            cloudOnly                 = $true
+        }
+
+        # Store required licenses in an array of objects with DisplayName and SkuId
+        foreach ($item in $cboRequiredLicense.SelectedItem) {
+            $formData.requiredLicense += [PSCustomObject]@{
+                DisplayName = $item.Content
+                SkuId       = $item.Tag
+            }
+        }
+
+        # Store ancillary licenses in an array of objects with DisplayName and SkuId
+        foreach ($item in $lstAncillaryLicenses.SelectedItems) {
+            $formData.ancillaryLicense += [PSCustomObject]@{
+                DisplayName = $item.Content
+                SkuId       = $item.Tag
+            }
+        }
+
+        # Store department groups in an array
+        if ($lstDepartmentGroups) {
+            $selectedDepartmentGroups = @()
+            foreach ($item in $lstDepartmentGroups.SelectedItems) {
+                $selectedDepartmentGroups += $item.Content
+            }
+        }
+
+        if ($cbTestMode.IsChecked -eq $true) {
+            $formData.testModeEnabled = $true
+        } else {
+            $formData.testModeEnabled = $false
+        }
+
+        if ($cbDisableSending8x8ProvisioningTicket.IsChecked -eq $true) {
+            $formData.Send8x8ProvisioningTicket = $false
+        } else {
+            $formData.Send8x8ProvisioningTicket = $true
+        }
+
+        if ($cbInstallSapience.IsChecked -eq $true) {
+            $formData.installSapience = $true
+        } else {
+            $formData.installSapience = $false
+        }
+
+        return $formData
+    }
+
+    # Function to initialize and refresh licenses
+    function Initialize-Licenses {
+        try {
+            Write-StatusMessage "Retrieving licenses..." -Type INFO
+            $btnRefreshLicenses.IsEnabled = $false
+
+            # Clear current items
+            $cboRequiredLicense.Items.Clear()
+            $lstAncillaryLicenses.Items.Clear()
+
+            # Get license info from Microsoft Graph
+            $skuQuery = "https://graph.microsoft.com/v1.0/subscribedSkus"
+
+            $skuResponse = Invoke-RestMethod -Method GET -Uri $skuQuery -Headers $script:GraphHeaders
+
+            $skus = $skuResponse.value | Select-Object skuId, skuPartNumber, consumedUnits, @{ Name = 'PrepaidUnits'; Expression = { $_.prepaidUnits.enabled } }
+
+            # Format license info if needed (or assume licenseInfo = $skus)
+            $licenseInfo = Get-FormattedLicenseInfo -Skus $skus
+
+            # Define the licenses you care about
+            $requiredLicenses = @(
+                "Exchange Online (Plan 1)",
+                "Microsoft 365 Business Basic",
+                "Microsoft 365 E3",
+                "Microsoft 365 E5",
+                "Microsoft 365 Business Premium",
+                "Microsoft 365 E3 (No Teams)",
+                "Microsoft 365 E5 (No Teams)",
+                "Microsoft 365 Business Premium (No Teams)"
+            )
+
+            # Populate the combo box with matching licenses
+            foreach ($license in $licenseInfo) {
+                foreach ($reqLicense in $requiredLicenses) {
+                    if ($license.SortName -eq $reqLicense) {
+                        $comboItem = New-Object System.Windows.Controls.ComboBoxItem
+                        $comboItem.Content = $license.DisplayName
+                        $comboItem.Tag = $license.SkuId # Store the SkuId for use later
+                        [void]$cboRequiredLicense.Items.Add($comboItem)
+                    }
+                }
+            }
+
+            # Loop through licenseInfo and only add licenses not in the required list
+            foreach ($license in $licenseInfo) {
+                $isRequired = $false
+                foreach ($reqLicense in $requiredLicenses) {
+                    if ($license.SortName -eq $reqLicense) {
+                        $isRequired = $true
+                        break
+                    }
+                }
+                if (-not $isRequired) {
+                    $listItem = New-Object System.Windows.Controls.ListBoxItem
+                    $listItem.Content = $license.DisplayName
+                    $listItem.Tag = $license.SkuId
+                    [void]$lstAncillaryLicenses.Items.Add($listItem)
+                }
+            }
+
+            Write-StatusMessage "Licenses refreshed successfully" -Type OK
+        } catch {
+            Write-StatusMessage "Error retrieving licenses: $($_.Exception.Message)" -Type ERROR
+            Show-CustomAlert -Message "Error retrieving licenses: $($_.Exception.Message)" -AlertType "Error" -Title "Error" -Owner $window
+        } finally {
+            $btnRefreshLicenses.IsEnabled = $true
+        }
+    }
+
+    # Function to validate required data
+    function Invoke-ValidateForm {
+        param (
+            [Parameter()]
+            $DisplayName, # TextBox for Display Name
+
+            [Parameter()]
+            $RequiredLicense  # ComboBox for Required License
+        )
+
+        # Validate DisplayName for "First Last" format using a regex pattern
+        $namePattern = "^[A-Za-z]+\s[A-Za-z]+$"  # Matches First Last format with only letters
+
+        if (-not $DisplayName -or $DisplayName -notmatch $namePattern) {
+            # Invalid format or empty
+            Show-CustomAlert -Message "Please enter a valid full name (First Last)" -Owner $window
+            return $false
+        }
+
+        # Check if an item is selected in the ComboBox
+        if (-not $RequiredLicense -or -not $cboRequiredLicense.SelectedItem) {
+            # No item selected
+            Show-CustomAlert -Message "Please select a required license." -Owner $window
+            return $false
+        }
+
+        # Validate required license availability
+        $requiredLicenseText = $cboRequiredLicense.SelectedItem.Content
+        if ($requiredLicenseText -match "\(Available:\s*(\d+)\)") {
+            $availableLicenses = [int]$Matches[1]
+            if ($availableLicenses -le 0) {
+                $licenseName = $requiredLicenseText -replace '\s*\(Available:.*\)', ''
+                Show-CustomAlert -Message "The selected required license '$licenseName' has no available licenses." -Owner $window
+                return $false
+            }
+        }
+
+        # Validate ancillary licenses availability
+        foreach ($selectedItem in $lstAncillaryLicenses.SelectedItems) {
+            $licenseText = $selectedItem.Content
+            if ($licenseText -match "\(Available:\s*(\d+)\)") {
+                $availableLicenses = [int]$Matches[1]
+                if ($availableLicenses -le 0) {
+                    $licenseName = $licenseText -replace '\s*\(Available:.*\)', ''
+                    Show-CustomAlert -Message "The selected ancillary license '$licenseName' has no available licenses." -Owner $window
+                    return $false
+                }
+            }
+        }
+
+        # If both validations pass, return true
+        return $true
+    }
+
+    # Function to initialize domains
+    function Initialize-Domains {
+        try {
+            Write-StatusMessage "Retrieving domains..." -Type INFO
+            $btnRefreshDomains.IsEnabled = $false
+
+            # Get domains from Graph API
+            $domainQuery = "https://graph.microsoft.com/v1.0/domains"
+            $domainResponse = Invoke-RestMethod -Method GET -Uri $domainQuery -Headers $script:GraphHeaders
+
+            # Filter for verified domains and sort by Id
+            $domains = $domainResponse.value | Where-Object { $_.isVerified -eq $true } | Sort-Object id
+
+            if ($null -eq $domains -or $domains.Count -eq 0) {
+                Write-StatusMessage "No verified domains found" -Type WARN
+                return
+            }
+
+            # Clear and reload domains
+            $cboDomain.Items.Clear()
+
+            # Add verified domains and find default domain
+            $defaultDomain = $null
+            foreach ($domain in $domains) {
+                [void]$cboDomain.Items.Add($domain.Id)
+                if ($domain.IsDefault) {
+                    $defaultDomain = $domain.Id
+                }
+            }
+
+            # Select default domain
+            if ($defaultDomain) {
+                $cboDomain.SelectedItem = $defaultDomain
+                Write-StatusMessage "Selected default domain: $defaultDomain" INFO
+            } elseif ($cboDomain.Items.Count -gt 0) {
+                $cboDomain.SelectedIndex = 0
+            }
+
+            Write-StatusMessage "Retrieved $($domains.Count) domains" -Type OK
+        } catch {
+            Write-StatusMessage "Error retrieving domains: $($_.Exception.Message)" -Type ERROR
+            Show-CustomAlert -Message "Error retrieving domains: $($_.Exception.Message)" -AlertType "Error" -Title "Error" -Owner $window
+        } finally {
+            $btnRefreshDomains.IsEnabled = $true
+        }
+    }
+
+    function Initialize-UsageLocation {
+        param (
+            [System.Windows.Controls.ComboBox]$ComboBox
+        )
+
+        $ComboBox.Items.Clear()
+
+        foreach ($country in $CountryMap.GetEnumerator() | Sort-Object Key) {
+            [void]$ComboBox.Items.Add([PSCustomObject]@{
+                    Name = $country.Key
+                    Code = $country.Value
+                })
+        }
+        # Tell ComboBox what to show vs store
+        $ComboBox.DisplayMemberPath = "Name"
+        $ComboBox.SelectedValuePath = "Code"
+
+        # Default to US
+        $ComboBox.SelectedValue = "US"
+
+        Write-StatusMessage "Usage location initialized with country names." -Type INFO
+    }
+
+    function Get-UsageLocationFromFields {
+        param (
+            [string]$CountryText,
+            [string]$CityText,
+            [hashtable]$CountryMap
+        )
+
+        # Check the Country field first
+        if (-not [string]::IsNullOrWhiteSpace($CountryText)) {
+            $countryName = $CountryText.Trim()
+            if ($CountryMap.ContainsKey($countryName)) {
+                return $CountryMap[$countryName]
+            }
+        }
+
+        # Fallback: check if City is like "Remote - COUNTRY"
+        if (-not [string]::IsNullOrWhiteSpace($CityText) -and $CityText -match '^Remote\s*-\s*(.+)$') {
+            $countryName = $Matches[1].Trim()
+            if ($CountryMap.ContainsKey($countryName)) {
+                return $CountryMap[$countryName]
+            }
+        }
+
+        # No match
+        return $CountryMap["United States"]
+    }
+
+    # Function to initialize department groups
+    function Initialize-DepartmentGroups {
+        try {
+            Write-StatusMessage "Initializing department groups..." -Type INFO
+
+            # Clear existing items
+            $lstDepartmentGroups.Items.Clear()
+
+            # Define department group options
+            $departmentGroupOptions = @(
+                "Marketing Group",
+                "Sales Group",
+                "Engineering Group",
+                "Finance Group",
+                "HR Group",
+                "Executive Group",
+                "IT Support Group",
+                "Customer Service Group"
+            )
+
+            # Add items to the listbox
+            foreach ($option in $departmentGroupOptions) {
+                $lstDepartmentGroups.Items.Add($option)
+            }
+
+            Write-StatusMessage "Department groups initialized successfully" -Type OK
+        } catch {
+            Write-StatusMessage "Error initializing department groups: $($_.Exception.Message)" -Type ERROR
+            Show-CustomAlert -Message "Error initializing department groups: $($_.Exception.Message)" -AlertType "Error" -Title "Error" -Owner $window
+        }
+    }
+
+    # Function to get selected items
+    function Get-SelectedDepartments {
+        $selectedDepartments = @()
+        if ($chkNFLROC.IsChecked) { $selectedDepartments += "NFL ROC" }
+        if ($chkSFLOC.IsChecked) { $selectedDepartments += "SFL OC" }
+        if ($chkNEROC.IsChecked) { $selectedDepartments += "NE ROC" }
+        if ($chkBilling.IsChecked) { $selectedDepartments += "Billing" }
+        if ($chkPSALL.IsChecked) { $selectedDepartments += "PS ALL" }
+        if ($chkPST1.IsChecked) { $selectedDepartments += "PS T1" }
+        if ($chkPST2.IsChecked) { $selectedDepartments += "PS T2" }
+        return $selectedDepartments
+    }
+
+    function Show-StatusMessage {
+        param (
+            [string]$Message,
+            [ValidateSet("Info", "Success", "Warning", "Error")]
+            [string]$Type = "Info"
+        )
+        $tbStatus.Text = $Message
+        switch ($Type) {
+            "Info" { $tbStatus.Foreground = "#0078D7" }
+            "Success" { $tbStatus.Foreground = "#107C10" }
+            "Warning" { $tbStatus.Foreground = "#FFB900" }
+            "Error" { $tbStatus.Foreground = "#E81123" }
+        }
+    }
+
+    # Add event handlers
+    $btnLocalFromHibob.Add_Click({
+            Reset-Form
+            Show-HiBobDataInput
+        })
+    $btnLoadJson.Add_Click({
+            Reset-Form
+            Invoke-LoadJsonFile
+        })
+    $btnSaveJson.Add_Click({ Save-JsonData })
+    $btnReset.Add_Click({ Reset-Form })
+    $btnRefreshLicenses.Add_Click({ Initialize-Licenses })
+    #$btnRefreshDepartments.Add_Click({ Initialize-DepartmentGroups })
+    $btnSubmit.Add_Click({
+            # Run the validation first
+            $isValid = Invoke-ValidateForm -DisplayName $txtDisplayName.Text -RequiredLicense $cboRequiredLicense
+
+            if ($isValid -eq $true) {
+                # If validation passes, collect the form data
+                $formData = Get-FormData
+                $Window.Close()  # Close the window after submission
+                return $formData  # Return the form data
+            } else {
+                # If validation fails, do not close the window and optionally show a message
+                Write-StatusMessage "Validation failed. Please fix the errors and try again." -Type ERROR
+            }
+        })
+
+    $btnCancel.Add_Click({
+            $Window.DialogResult = $false
+            $Window.Close()
+        })
+
+    # Add event handler for the refresh button
+    $btnRefreshDomains.Add_Click({ Initialize-Domains })
+
+    # Initialize licenses
+    Initialize-Licenses
+
+    # Initialize domains
+    Initialize-Domains
+
+    # Country name to code mapping for usage location detection
+    $CountryMap = @{
+        "United States"                            = "US"
+        "Philippines"                              = "PH"
+        "Afghanistan"                              = "AF"
+        "Åland Islands"                            = "AX"
+        "Albania"                                  = "AL"
+        "Algeria"                                  = "DZ"
+        "American Samoa"                           = "AS"
+        "Andorra"                                  = "AD"
+        "Angola"                                   = "AO"
+        "Antarctica"                               = "AQ"
+        "Antigua and Barbuda"                      = "AG"
+        "Argentina"                                = "AR"
+        "Armenia"                                  = "AM"
+        "Aruba"                                    = "AW"
+        "Australia"                                = "AU"
+        "Austria"                                  = "AT"
+        "Azerbaijan"                               = "AZ"
+        "Bahamas"                                  = "BS"
+        "Bahrain"                                  = "BH"
+        "Bangladesh"                               = "BD"
+        "Barbados"                                 = "BB"
+        "Belarus"                                  = "BY"
+        "Belgium"                                  = "BE"
+        "Belize"                                   = "BZ"
+        "Benin"                                    = "BJ"
+        "Bermuda"                                  = "BM"
+        "Bhutan"                                   = "BT"
+        "Bolivia"                                  = "BO"
+        "Bonaire"                                  = "BQ"
+        "Bosnia and Herzegovina"                   = "BA"
+        "Botswana"                                 = "BW"
+        "Bouvet Island"                            = "BV"
+        "Brazil"                                   = "BR"
+        "British Indian Ocean Territory"           = "IO"
+        "British Virgin Islands"                   = "VG"
+        "Brunei"                                   = "BN"
+        "Bulgaria"                                 = "BG"
+        "Burkina Faso"                             = "BF"
+        "Burundi"                                  = "BI"
+        "Cabo Verde"                               = "CV"
+        "Cambodia"                                 = "KH"
+        "Cameroon"                                 = "CM"
+        "Canada"                                   = "CA"
+        "Cayman Islands"                           = "KY"
+        "Central African Republic"                 = "CF"
+        "Chad"                                     = "TD"
+        "Chile"                                    = "CL"
+        "China"                                    = "CN"
+        "Christmas Island"                         = "CX"
+        "Cocos (Keeling) Islands"                  = "CC"
+        "Colombia"                                 = "CO"
+        "Comoros"                                  = "KM"
+        "Congo"                                    = "CG"
+        "Congo (DRC)"                              = "CD"
+        "Cook Islands"                             = "CK"
+        "Costa Rica"                               = "CR"
+        "Côte d'Ivoire"                            = "CI"
+        "Croatia"                                  = "HR"
+        "Cuba"                                     = "CU"
+        "Curaçao"                                  = "CW"
+        "Cyprus"                                   = "CY"
+        "Czechia"                                  = "CZ"
+        "Denmark"                                  = "DK"
+        "Djibouti"                                 = "DJ"
+        "Dominica"                                 = "DM"
+        "Dominican Republic"                       = "DO"
+        "Ecuador"                                  = "EC"
+        "Egypt"                                    = "EG"
+        "El Salvador"                              = "SV"
+        "Equatorial Guinea"                        = "GQ"
+        "Eritrea"                                  = "ER"
+        "Estonia"                                  = "EE"
+        "eSwatini"                                 = "SZ"
+        "Ethiopia"                                 = "ET"
+        "Faroe Islands"                            = "FO"
+        "Fiji"                                     = "FJ"
+        "Finland"                                  = "FI"
+        "France"                                   = "FR"
+        "French Guiana"                            = "GF"
+        "French Polynesia"                         = "PF"
+        "French Southern Territories"              = "TF"
+        "Gabon"                                    = "GA"
+        "Gambia"                                   = "GM"
+        "Georgia"                                  = "GE"
+        "Germany"                                  = "DE"
+        "Ghana"                                    = "GH"
+        "Gibraltar"                                = "GI"
+        "Greece"                                   = "GR"
+        "Greenland"                                = "GL"
+        "Grenada"                                  = "GD"
+        "Guadeloupe"                               = "GP"
+        "Guam"                                     = "GU"
+        "Guatemala"                                = "GT"
+        "Guernsey"                                 = "GG"
+        "Guinea"                                   = "GN"
+        "Guinea-Bissau"                            = "GW"
+        "Guyana"                                   = "GY"
+        "Haiti"                                    = "HT"
+        "Heard Island and McDonald Islands"        = "HM"
+        "Honduras"                                 = "HN"
+        "Hong Kong SAR"                            = "HK"
+        "Hungary"                                  = "HU"
+        "Iceland"                                  = "IS"
+        "India"                                    = "IN"
+        "Indonesia"                                = "ID"
+        "Iran"                                     = "IR"
+        "Iraq"                                     = "IQ"
+        "Ireland"                                  = "IE"
+        "Isle of Man"                              = "IM"
+        "Israel"                                   = "IL"
+        "Italy"                                    = "IT"
+        "Jamaica"                                  = "JM"
+        "Japan"                                    = "JP"
+        "Jersey"                                   = "JE"
+        "Jordan"                                   = "JO"
+        "Kazakhstan"                               = "KZ"
+        "Kenya"                                    = "KE"
+        "Kiribati"                                 = "KI"
+        "Korea (South)"                            = "KR"
+        "Kuwait"                                   = "KW"
+        "Kyrgyzstan"                               = "KG"
+        "Laos"                                     = "LA"
+        "Latvia"                                   = "LV"
+        "Lebanon"                                  = "LB"
+        "Lesotho"                                  = "LS"
+        "Liberia"                                  = "LR"
+        "Libya"                                    = "LY"
+        "Liechtenstein"                            = "LI"
+        "Lithuania"                                = "LT"
+        "Luxembourg"                               = "LU"
+        "Macao SAR"                                = "MO"
+        "Madagascar"                               = "MG"
+        "Malawi"                                   = "MW"
+        "Malaysia"                                 = "MY"
+        "Maldives"                                 = "MV"
+        "Mali"                                     = "ML"
+        "Malta"                                    = "MT"
+        "Marshall Islands"                         = "MH"
+        "Martinique"                               = "MQ"
+        "Mauritania"                               = "MR"
+        "Mauritius"                                = "MU"
+        "Mayotte"                                  = "YT"
+        "Mexico"                                   = "MX"
+        "Micronesia"                               = "FM"
+        "Moldova"                                  = "MD"
+        "Monaco"                                   = "MC"
+        "Mongolia"                                 = "MN"
+        "Montenegro"                               = "ME"
+        "Montserrat"                               = "MS"
+        "Morocco"                                  = "MA"
+        "Mozambique"                               = "MZ"
+        "Myanmar"                                  = "MM"
+        "Namibia"                                  = "NA"
+        "Nauru"                                    = "NR"
+        "Nepal"                                    = "NP"
+        "Netherlands"                              = "NL"
+        "New Caledonia"                            = "NC"
+        "New Zealand"                              = "NZ"
+        "Nicaragua"                                = "NI"
+        "Niger"                                    = "NE"
+        "Nigeria"                                  = "NG"
+        "Niue"                                     = "NU"
+        "Norfolk Island"                           = "NF"
+        "North Korea"                              = "KP"
+        "North Macedonia"                          = "MK"
+        "Northern Mariana Islands"                 = "MP"
+        "Norway"                                   = "NO"
+        "Oman"                                     = "OM"
+        "Pakistan"                                 = "PK"
+        "Palau"                                    = "PW"
+        "Palestinian Authority"                    = "PS"
+        "Panama"                                   = "PA"
+        "Papua New Guinea"                         = "PG"
+        "Paraguay"                                 = "PY"
+        "Peru"                                     = "PE"
+        "Pitcairn Islands"                         = "PN"
+        "Poland"                                   = "PL"
+        "Portugal"                                 = "PT"
+        "Puerto Rico"                              = "PR"
+        "Qatar"                                    = "QA"
+        "Réunion"                                  = "RE"
+        "Romania"                                  = "RO"
+        "Russia"                                   = "RU"
+        "Rwanda"                                   = "RW"
+        "Saint Barthélemy"                         = "BL"
+        "Saint Kitts and Nevis"                    = "KN"
+        "Saint Lucia"                              = "LC"
+        "Saint Martin"                             = "MF"
+        "Saint Pierre and Miquelon"                = "PM"
+        "Saint Vincent and the Grenadines"         = "VC"
+        "Samoa"                                    = "WS"
+        "San Marino"                               = "SM"
+        "São Tomé and Príncipe"                    = "ST"
+        "Saudi Arabia"                             = "SA"
+        "Senegal"                                  = "SN"
+        "Serbia"                                   = "RS"
+        "Seychelles"                               = "SC"
+        "Sierra Leone"                             = "SL"
+        "Singapore"                                = "SG"
+        "Sint Maarten"                             = "SX"
+        "Slovakia"                                 = "SK"
+        "Slovenia"                                 = "SI"
+        "Solomon Islands"                          = "SB"
+        "Somalia"                                  = "SO"
+        "South Africa"                             = "ZA"
+        "South Georgia and South Sandwich Islands" = "GS"
+        "South Sudan"                              = "SS"
+        "Spain"                                    = "ES"
+        "Sri Lanka"                                = "LK"
+        "St Helena, Ascension, Tristan da Cunha"   = "SH"
+        "Sudan"                                    = "SD"
+        "Suriname"                                 = "SR"
+        "Svalbard"                                 = "SJ"
+        "Sweden"                                   = "SE"
+        "Switzerland"                              = "CH"
+        "Syria"                                    = "SY"
+        "Taiwan"                                   = "TW"
+        "Tajikistan"                               = "TJ"
+        "Tanzania"                                 = "TZ"
+        "Thailand"                                 = "TH"
+        "Timor-Leste"                              = "TL"
+        "Togo"                                     = "TG"
+        "Tokelau"                                  = "TK"
+        "Tonga"                                    = "TO"
+        "Trinidad and Tobago"                      = "TT"
+        "Tunisia"                                  = "TN"
+        "Türkiye"                                  = "TR"
+        "Turkmenistan"                             = "TM"
+        "Turks and Caicos Islands"                 = "TC"
+        "Tuvalu"                                   = "TV"
+        "Uganda"                                   = "UG"
+        "Ukraine"                                  = "UA"
+        "United Arab Emirates"                     = "AE"
+        "United Kingdom"                           = "GB"
+        "Uruguay"                                  = "UY"
+        "U.S. Outlying Islands"                    = "UM"
+        "U.S. Virgin Islands"                      = "VI"
+        "Uzbekistan"                               = "UZ"
+        "Vanuatu"                                  = "VU"
+        "Vatican City"                             = "VA"
+        "Venezuela"                                = "VE"
+        "Vietnam"                                  = "VN"
+        "Wallis and Futuna"                        = "WF"
+        "Yemen"                                    = "YE"
+        "Zambia"                                   = "ZM"
+        "Zimbabwe"                                 = "ZW"
+    }
+
+    # Set default location to US
+    Initialize-UsageLocation -ComboBox $cboUsageLocation
+
+    # Initialize department groups
+    # Initialize-DepartmentGroups
+
+    # Define copy user operations options
+    $copyUserOperationsOptions = @(
+        'None',
+        'Copy Attributes',
+        'Copy Groups',
+        'Copy Attributes and Groups'
+    )
+
+    # Populate the copy user operations dropdown
+    foreach ($option in $copyUserOperationsOptions) {
+        [void]$cboCopyUserOperations.Items.Add($option)
+    }
+
+    # Define timezone options
+    $timeZoneOptions = @(
+        'Eastern Standard Time',
+        'Central Standard Time',
+        'Mountain Standard Time',
+        'US Mountain Standard Time (Arizona)',
+        'Pacific Standard Time',
+        'Singapore Standard Time'
+    )
+
+    # Populate the timezone dropdown
+    foreach ($timeZone in $timeZoneOptions) {
+        [void]$cboTimeZone.Items.Add($timeZone)
+    }
+
+    # Add validation for DisplayName
+    $txtDisplayName.Add_TextChanged({
+            $namePattern = "^[A-Za-z]+\s[A-Za-z]+$"
+            if ($this.Text -and -not ($this.Text -match $namePattern)) {
+                $this.BorderBrush = 'Red'
+                $this.BorderThickness = 2
+                $this.ToolTip = "Name must be in 'First Last' format"
+            } else {
+                $this.BorderBrush = $null
+                $this.BorderThickness = 1
+                $this.ToolTip = $null
+            }
+        })
+
+    # Event handler for Country or City changes
+    $UpdateUsageLocation = {
+        $newUsageLocation = Get-UsageLocationFromFields -CountryText $txtCountry.Text -CityText $txtCity.Text -CountryMap $CountryMap
+
+        if ($newUsageLocation) {
+            $cboUsageLocation.SelectedValue = $newUsageLocation
+        } else {
+            $cboUsageLocation.SelectedIndex = -1
+        }
+    }
+
+    # Hook to update the TextChanged event for usage location
+    $txtCountry.Add_TextChanged($UpdateUsageLocation)
+    $txtCity.Add_TextChanged($UpdateUsageLocation)
+
+    # Show the form
+    $Window.ShowDialog() | Out-Null
+
+    # Return the form data
+    return Get-FormData
+}
+
+# Main Exection Functions
+function Test-EntraUserIsDisabled {
+    param (
+        [Parameter(Mandatory)]
+        [string]$UserToCheck
+    )
+    try {
+        $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=displayName eq '$UserToCheck' or userPrincipalName eq '$UserToCheck'&`$select=accountEnabled"
+        $userResult = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+        if ($userResult.value.Count -eq 1) {
+            return -not $userResult.value[0].accountEnabled
+        }
+        return $false
+    } catch {
+        Write-StatusMessage -Message "Error checking if user is disabled: $_" -Type ERROR
+        return $false
+    }
+}
+
+function Get-EntraUserCopiedAttributes {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]$UserToCopy
+    )
+
+    try {
+        Write-StatusMessage -Message "Getting template user details for: $UserToCopy" -Type INFO
+
+        # Build Graph API query with proper version
+        $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=displayName eq '$UserToCopy' or userPrincipalName eq '$UserToCopy'&`$select=id,userPrincipalName,displayName,companyName,officeLocation,jobTitle,department,faxNumber,streetAddress,city,state,postalCode,country"
+
+        $templateUserGraph = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+
+        # Check for null or multiple users
+        if ($null -eq $templateUserGraph.value -or $templateUserGraph.value.Count -eq 0) {
+            Write-StatusMessage -Message "Could not find user $UserToCopy in Microsoft Graph" -Type ERROR
+            Exit-Script -Message "Template user not found: $UserToCopy" -ExitCode UserNotFound
+        }
+
+        if ($templateUserGraph.value.Count -gt 1) {
+            Write-StatusMessage -Message "Found multiple users with DisplayName: $UserToCopy" -Type ERROR
+            Exit-Script -Message "Multiple template users found - please check for duplicate DisplayName attributes" -ExitCode DuplicateUser
+        }
+
+        # Get manager information
+        $userId = $templateUserGraph.value[0].id
+        $managerDisplayName = $null
+        try {
+            $managerQuery = "https://graph.microsoft.com/v1.0/users/$userId/manager"
+            $manager = Invoke-RestMethod -Method GET -Uri $managerQuery -Headers $script:GraphHeaders
+            $managerDisplayName = $manager.displayName
+        } catch {
+            Write-StatusMessage -Message "Could not retrieve manager for user $($UserToCopy): $_" -Type WARN
+            $managerDisplayName = $null
+        }
+
+        Write-StatusMessage -Message "Successfully retrieved template user details" -Type OK
+
+        return [pscustomobject]@{
+            templateUserUPN = $templateUserGraph.value[0].userPrincipalName
+            companyName     = $templateUserGraph.value[0].companyName
+            officeLocation  = $templateUserGraph.value[0].officeLocation
+            jobTitle        = $templateUserGraph.value[0].jobTitle
+            department      = $templateUserGraph.value[0].department
+            faxNumber       = $templateUserGraph.value[0].faxNumber
+            streetAddress   = $templateUserGraph.value[0].streetAddress
+            city            = $templateUserGraph.value[0].city
+            state           = $templateUserGraph.value[0].state
+            postalCode      = $templateUserGraph.value[0].postalCode
+            country         = $templateUserGraph.value[0].country
+            templateManager = $managerDisplayName
+        }
+
+    } catch {
+        Write-StatusMessage -Message "Failed to get template user: $_" -Type ERROR
+        Exit-Script -Message "Critical error getting template user" -ExitCode GeneralError
+    }
+}
+
+function Get-TemplateUser {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]$UserToCopy
+    )
+
+    try {
+        Write-StatusMessage -Message "Getting template user details for: $UserToCopy" -Type INFO
+
+        $templateData = @{
+            TemplateUser        = $null
+            TemplateAttributes  = $null
+            TemplateUserManager = $null
+            Domain              = $null
+        }
+
+        # Get Microsoft 365 attributes
+        try {
+            $entraUser = Get-EntraUserCopiedAttributes -UserToCopy $UserToCopy
+            if (-not $entraUser) {
+                Write-StatusMessage -Message "Could not find user $UserToCopy in Microsoft 365" -Type ERROR
+                Exit-Script -Message "Template user not found: $UserToCopy" -ExitCode UserNotFound
+            }
+
+            $templateData.TemplateUser = $entraUser.templateUserUPN
+            $templateData.TemplateAttributes = $entraUser
+            $templateData.TemplateUserManager = $entraUser.templateManager
+            $templateData.Domain = $entraUser.templateUserUPN -replace '.+?(?=@)'
+
+        } catch {
+            Write-StatusMessage -Message "Error getting Microsoft 365 template user: $_" -Type ERROR
+            Exit-Script -Message "Critical error getting Microsoft 365 template user" -ExitCode GeneralError
+        }
+
+
+        Write-StatusMessage -Message "Successfully retrieved template user details" -Type OK
+        return $templateData
+
+    } catch {
+        Write-StatusMessage -Message "Failed to get template user: $_" -Type ERROR
+        Exit-Script -Message "Critical error in template user retrieval" -ExitCode GeneralError
+    }
+}
+
+function New-UserProperties {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$DisplayName,
+
+        [Parameter(Mandatory)]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$FirstName,
+
+        [Parameter()]
+        [string]$LastName,
+
+        [Parameter()]
+        [string]$userPrincipalName
+    )
+
+    try {
+        Write-StatusMessage -Message "Generating properties for new user: $DisplayName" -Type INFO
+
+        # Common logic: Determine first and last name
+        if (-not $FirstName -or -not $LastName) {
+            $nameParts = $DisplayName -split ' '
+            if ($nameParts.Count -lt 2) {
+                Write-StatusMessage -Message "Invalid display name format: Must include first and last name" -Type ERROR
+                Exit-Script -Message "Display name must include first and last name" -ExitCode GeneralError
+            }
+            $FirstName = $nameParts[-2]  # Second to last part
+            $LastName = $nameParts[-1]   # Last part
+        }
+
+        # Generate account name based on mode
+        if (-not $userPrincipalName) {
+            $accountName = ($FirstName + '.' + $LastName).ToLower()
+            $userPrincipalName = ($accountName + $Domain).ToLower()
+        } else {
+            $accountName = ($userPrincipalName -split '@')[0]
+        }
+
+        # Check Microsoft 365 for duplicates
+        try {
+            $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$userPrincipalName' or mail eq '$userPrincipalName' or proxyAddresses/any(x:x eq 'SMTP:$userPrincipalName') or proxyAddresses/any(x:x eq 'smtp:$userPrincipalName')"
+            $mailbox = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+
+            if ($mailbox.value.Count -gt 0) {
+                Write-StatusMessage -Message "Email address $userPrincipalName already exists for mailbox: $($mailbox.value[0].displayName). Please try again." -Type WARN
+
+                $isDuplicate = $true
+                while ($isDuplicate) {
+                    $formDuplicateEmail = Show-CustomAlert `
+                        -Title "Duplicate Email Address" `
+                        -DefaultValue $accountName `
+                        -Message "Please enter a different email address: '$userPrincipalName' already exists." `
+                        -AlertType "Warning"
+
+                    if ([string]::IsNullOrWhiteSpace($formDuplicateEmail) -or $formDuplicateEmail -eq $accountName) {
+                        Write-StatusMessage -Message "User cancelled email address selection" -Type WARN
+                        Exit-Script -Message "Operation cancelled by user" -ExitCode Cancelled
+                    }
+
+                    $accountName = $formDuplicateEmail
+                    $userPrincipalName = ($accountName + $Domain).ToLower()
+
+                    $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$userPrincipalName' or mail eq '$userPrincipalName' or proxyAddresses/any(x:x eq 'SMTP:$userPrincipalName') or proxyAddresses/any(x:x eq 'smtp:$userPrincipalName')"
+                    $checkMailbox = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+
+                    if ($checkMailbox.value.Count -eq 0) {
+                        $isDuplicate = $false
+                        Write-StatusMessage -Message "Using custom email address: $userPrincipalName" -Type OK
+                    } else {
+                        Write-StatusMessage -Message "Email address $userPrincipalName is also in use by: $($checkMailbox.value[0].displayName). Please try again." -Type WARN
+                    }
+                }
+            }
+        } catch {
+            Write-StatusMessage -Message "Graph API validation passed - mailbox does not exist" -Type OK
+        }
+
+        # Return Cloud-Only properties
+        return @{
+            FirstName         = $FirstName
+            LastName          = $LastName
+            DisplayName       = $DisplayName
+            mailNickname      = $FirstName + '.' + $LastName
+            Email             = $userPrincipalName
+            userPrincipalName = $userPrincipalName
+        }
+
+    } catch {
+        Write-StatusMessage -Message "Critical error in New-UserProperties: $_" -Type ERROR
+        Exit-Script -Message "Critical error generating user properties" -ExitCode GeneralError
+    }
+}
+
+function New-ReadablePassword {
+    <#
+    .SYNOPSIS
+        Generates a human-readable password using random words and special characters.
+
+    .DESCRIPTION
+        Creates a memorable password by combining random words from a curated wordlist with special characters
+        and numbers. Allows user to accept or reject generated passwords. Returns both plain text and SecureString versions.
+
+    .PARAMETER WordCount
+        Number of words to use in the password (2-20). Default is 3.
+
+    .PARAMETER AddSpaces
+        Adds spaces between words in the final password.
+
+    .PARAMETER WordListPath
+        Optional path to a custom wordlist file. If not provided, uses default GitHub wordlist.
+
+    .PARAMETER GitHubToken
+        GitHub Personal Access Token for accessing private word list repository.
+
+    .EXAMPLE
+        $password = New-ReadablePassword -GitHubToken "your-github-pat"
+        # Prompts user with generated password like: "Mountain7$ Forest#2 Lake"
+
+    .NOTES
+        Name: New-ReadablePassword
+        Author: Chris Williams
+        Version: 1.0.0
+        DateCreated: 2025-Jan-25
+    #>
+
+    [CmdletBinding()]
+    param(
+        [ValidateRange(2, 20)]
+        [int]$WordCount = 3,
+        [switch]$AddSpaces,
+        [string]$WordListPath,
+        [Parameter(Mandatory)]
+        [string]$GitHubToken
+    )
+
+    try {
+        Write-StatusMessage -Message "Generating secure word-based password" -Type INFO
+
+        do {
+            # Get word list
+            $FullList = if ($WordListPath -and (Test-Path $WordListPath)) {
+                Get-Content $WordListPath
+            } else {
+                $headers = @{
+                    "Authorization" = "token $GitHubToken"
+                    "Accept"        = "application/json"
+                }
+                (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ryanchrisw/CompassDeploy/refs/heads/main/Wordlist/wordlist" -Headers $headers).Content.Trim().split("`n")
+            }
+
+            # Group words by length
+            $WordsByLength = $FullList | Group-Object Length -AsHashTable
+
+            # Select appropriate word lengths based on count
+            $WordList = switch ($WordCount) {
+                { $_ -le 3 } { @($WordsByLength[7]) + @($WordsByLength[8]) + @($WordsByLength[9]) | Where-Object { $_ } }
+                4 { 4..7 | ForEach-Object { $WordsByLength[$_] } | Where-Object { $_ } }
+                5 { 4..6 | ForEach-Object { $WordsByLength[$_] } | Where-Object { $_ } }
+                default { 3..5 | ForEach-Object { $WordsByLength[$_] } | Where-Object { $_ } }
+            }
+
+            # Generate password
+            $SpecialChars = [char[]]((33, 35) + (36..38) + (40..46) + (60..62) + (64))
+            $Numbers = [char[]](48..57)
+
+            $Password = 1..$WordCount | ForEach-Object {
+                if ($_ -eq $WordCount) {
+                    $WordList | Get-Random
+                } else {
+                    "$($WordList | Get-Random)$([char[]]($SpecialChars + $Numbers) | Get-Random)"
+                }
+            }
+
+            $plainPassword = if ($AddSpaces) { $Password -join ' ' } else { $Password -join '' }
+
+            # Display password and get confirmation
+            Write-Host "`nGenerated Password: $plainPassword" -ForegroundColor Cyan
+            $response = Read-Host "Accept this password? (y/n)"
+
+        } while ($response -ne 'y')
+
+        Write-StatusMessage -Message "Password accepted" -Type OK
+        return [PSCustomObject]@{
+            PlainPassword  = $plainPassword
+            SecurePassword = ConvertTo-SecureString -String $plainPassword -AsPlainText -Force
+        }
+    } catch {
+        Write-StatusMessage -Message "Critical error in password generation: $_" -Type ERROR
+        Exit-Script -Message "Critical password generation failure" -ExitCode GeneralError
+    }
+}
+
+function Confirm-UserCreation {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [hashtable]$NewUserProperties,
+
+        [Parameter()]
+        [string]$TemplateUser,
+
+        [Parameter(Mandatory)]
+        [string]$Password
+    )
+
+    try {
+        Write-StatusMessage -Message "Preparing user creation summary" -Type INFO
+
+        # Build summary with consistent formatting
+        $summary = @"
+New User Details:
+----------------
+- Display Name    = $($NewUserProperties.DisplayName)
+- Email Address   = $($NewUserProperties.Email)
+- Password        = $Password
+- First Name      = $($NewUserProperties.FirstName)
+- Last Name       = $($NewUserProperties.LastName)
+- Template User   = $(if ($TemplateUser) {$TemplateUser} else {"No template user selected"})
+"@
+
+        # Display summary and get confirmation
+        Write-StatusMessage -Message $summary -Type SUMMARY
+        Write-StatusMessage -Message "Please review the details above carefully" -Type WARN
+        $confirmation = Read-Host "Do you want to proceed with user creation? (Y/N)"
+
+        if ($confirmation.ToUpper() -ne 'Y') {
+            Write-StatusMessage -Message "User creation cancelled." -Type WARN
+            Exit-Script -Message "Operation cancelled by user" -ExitCode Cancelled
+        }
+
+        Write-StatusMessage -Message "User creation confirmed." -Type OK
+
+    } catch {
+        Write-StatusMessage -Message "Error during user creation confirmation: $_" -Type ERROR
+        Exit-Script -Message "Failed to confirm user creation" -ExitCode GeneralError
+    }
+}
+
+function New-UserStandard {
+    [CmdletBinding(SupportsShouldProcess)]
+    param (
+        [Parameter(Mandatory)][hashtable]$NewUser,
+        [Parameter()][string]$Password
+    )
+
+    try {
+
+        Write-StatusMessage -Message "Creating new user in Microsoft Graph: $($NewUser.DisplayName)" -Type INFO
+
+        $newUserBody = @{
+            accountEnabled    = $true
+            displayName       = $NewUser.DisplayName
+            givenName         = $NewUser.FirstName
+            surname           = $NewUser.LastName
+            userPrincipalName = $NewUser.UserPrincipalName
+            mailNickname      = $NewUser.mailNickname
+            mail              = $NewUser.Email
+            passwordProfile   = @{
+                forceChangePasswordNextSignIn = $true
+                password                      = $Password
+            }
+        }
+
+        if ($PSCmdlet.ShouldProcess($NewUser.DisplayName, "Create user in Microsoft Graph")) {
+            $null = Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/users" -Headers $script:GraphHeaders -Body ($newUserBody | ConvertTo-Json -Depth 10) -ContentType "application/json"
+            Write-StatusMessage -Message "Successfully created user in Microsoft Graph: $($NewUser.DisplayName)" -Type OK
+        }
+
+    } catch {
+        Write-StatusMessage -Message "Failed to create user in Microsoft Graph): $_" -Type ERROR
+        Exit-Script -Message "Failed to create user in Microsoft Graph" -ExitCode GeneralError
+    }
+}
+
+function Set-UserOptionalFields {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]$Identity,
+
+        [Parameter(Mandatory)]
+        [pscustomobject]$UserInput,
+
+        [Parameter()]
+        [pscustomobject]$TemplateAttributes
+    )
+
+    function Format-PhoneNumber {
+        param (
+            [string]$PhoneNumber
+        )
+
+        # Return as-is if null or whitespace
+        if ([string]::IsNullOrWhiteSpace($PhoneNumber)) {
+            return $PhoneNumber
+        }
+
+        # If it already looks like a formatted number, don't touch it
+        if ($PhoneNumber -match '^(1-\d{3}-\d{3}-\d{4})$' -or
+            $PhoneNumber -match '^\(\d{3}\) \d{3}-\d{4}$' -or
+            $PhoneNumber -match '^\+\d{1,3} \d{3}-\d{3}-\d{4}$') {
+            return $PhoneNumber
+        }
+
+        # Clean the number: keep only digits, unless it starts with a +
+        $cleanedNumber = $PhoneNumber -replace '[^\d]', ''
+        if ($PhoneNumber.StartsWith('+')) {
+            $cleanedNumber = '+' + $cleanedNumber
+        }
+
+        # Format based on different cases
+        switch -regex ($cleanedNumber) {
+            '^1(\d{3})(\d{3})(\d{4})$' {
+                return "1-$($matches[1])-$($matches[2])-$($matches[3])"
+            }
+            '^\+(\d{1,3})(\d{3})(\d{3})(\d{4})$' {
+                return "+$($matches[1]) $($matches[2])-$($matches[3])-$($matches[4])"
+            }
+            '^(\d{3})(\d{3})(\d{4})$' {
+                return "($($matches[1])) $($matches[2])-$($matches[3])"
+            }
+            default {
+                Write-StatusMessage -Message "Could not format phone number: $PhoneNumber" -Type WARN
+                return $PhoneNumber
+            }
+        }
+    }
+
+    try {
+        Write-StatusMessage -Message "Setting optional fields for user: $Identity" -Type INFO
+
+        # Common merged input processing
+        $mergedInput = @{}
+        $allowedUserProps = @(
+            'companyName',
+            'officeLocation',
+            'department',
+            'jobTitle',
+            'mobilePhone',
+            'businessPhone',
+            'faxNumber',
+            'streetAddress',
+            'city',
+            'state',
+            'postalCode',
+            'country',
+            'employeeHireDate',
+            'EmployeeId'
+        )
+
+        # Add allowed UserInput values first
+        foreach ($prop in $allowedUserProps) {
+            $value = $UserInput.$prop
+            if ($value) {
+                $mergedInput[$prop] = $value
+            }
+        }
+
+        # Fill in missing allowed properties from TemplateAttributes
+        foreach ($prop in $allowedUserProps) {
+            if (-not $mergedInput.ContainsKey($prop)) {
+                $value = $TemplateAttributes.$prop
+                if ($value) {
+                    $mergedInput[$prop] = $value
+                }
+            }
+        }
+
+        # Format phone numbers
+        if ($mergedInput.mobilePhone) {
+            $mergedInput.mobilePhone = Format-PhoneNumber -PhoneNumber $mergedInput.mobilePhone
+        }
+        if ($mergedInput.businessPhone) {
+            $mergedInput.businessPhone = Format-PhoneNumber -PhoneNumber $mergedInput.businessPhone
+        }
+        if ($mergedInput.faxNumber) {
+            $mergedInput.faxNumber = Format-PhoneNumber -PhoneNumber $mergedInput.faxNumber
+        }
+
+        # Microsoft 365 Update
+        $updateBody = @{}
+        if ($mergedInput.companyName) { $updateBody.companyName = $mergedInput.companyName }
+        if ($mergedInput.employeeHireDate) { $updateBody.employeeHireDate = $mergedInput.employeeHireDate }
+        if ($mergedInput.officeLocation) { $updateBody.officeLocation = $mergedInput.officeLocation }
+        if ($mergedInput.department) { $updateBody.department = $mergedInput.department }
+        if ($mergedInput.jobTitle) { $updateBody.jobTitle = $mergedInput.jobTitle }
+        if ($mergedInput.mobilePhone) { $updateBody.mobilePhone = $mergedInput.mobilePhone }
+        if ($mergedInput.businessPhone) { $updateBody.businessPhones = @($mergedInput.businessPhone) }
+        if ($mergedInput.faxNumber) { $updateBody.faxNumber = $mergedInput.faxNumber }
+        if ($mergedInput.streetAddress) { $updateBody.streetAddress = $mergedInput.streetAddress }
+        if ($mergedInput.city) { $updateBody.city = $mergedInput.city }
+        if ($mergedInput.state) { $updateBody.state = $mergedInput.state }
+        if ($mergedInput.postalCode) { $updateBody.postalCode = $mergedInput.postalCode }
+        if ($mergedInput.country) { $updateBody.country = $mergedInput.country }
+
+        if ($updateBody.Count -gt 0) {
+            $userQuery = "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$Identity'"
+            $maxRetries = 5
+            $retryDelaySec = 10
+            $user = $null
+
+            for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+                $user = Invoke-RestMethod -Method GET -Uri $userQuery -Headers $script:GraphHeaders
+                if ($user.value.Count -gt 0) { break }
+
+                if ($attempt -lt $maxRetries) {
+                    Write-StatusMessage -Message "User not found: $Identity (attempt $attempt/$maxRetries), retrying in ${retryDelaySec}s..." -Type WARN
+                    Start-Sleep -Seconds $retryDelaySec
+                }
+            }
+
+            if ($user.value.Count -eq 0) {
+                Write-StatusMessage -Message "User not found after $maxRetries attempts: $Identity" -Type ERROR
+                return
+            }
+
+            $userId = $user.value[0].id
+            Invoke-RestMethod -Method PATCH -Uri "https://graph.microsoft.com/v1.0/users/$userId" -Headers $script:GraphHeaders -Body ($updateBody | ConvertTo-Json -Depth 10) -ContentType "application/json" | Out-Null
+        }
+
+        Write-StatusMessage -Message "Successfully set optional fields for user: $Identity" -Type OK
+    } catch {
+        Write-StatusMessage -Message "Failed to set optional fields for user: $Identity - $_" -Type ERROR
+    }
+}
+
+function Set-UserManager {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]$Identity,
+
+        [Parameter(Mandatory)]
+        [string]$ManagerInput
+    )
+
+    try {
+        Write-StatusMessage -Message "Setting manager for user: $Identity" -Type INFO
+
+        # Microsoft 365 manager setting
+        $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=displayName eq '$ManagerInput' or userPrincipalName eq '$ManagerInput'"
+        $manager = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+
+        if ($manager.value.Count -gt 0) {
+            $managerId = $manager.value[0].id
+
+            # Get the user's ID (with retry for filter index replication lag)
+            $graphQuery = "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$Identity'"
+            $maxRetries = 5
+            $retryDelaySec = 10
+            $user = $null
+
+            for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+                $user = Invoke-RestMethod -Method GET -Uri $graphQuery -Headers $script:GraphHeaders
+                if ($user.value.Count -gt 0) { break }
+
+                if ($attempt -lt $maxRetries) {
+                    Write-StatusMessage -Message "User not found: $Identity (attempt $attempt/$maxRetries), retrying in ${retryDelaySec}s..." -Type WARN
+                    Start-Sleep -Seconds $retryDelaySec
+                }
+            }
+
+            if ($user.value.Count -gt 0) {
+                $userId = $user.value[0].id
+
+                # Set the manager relationship
+                $updateBody = @{
+                    "@odata.id" = "https://graph.microsoft.com/v1.0/users/$managerId"
+                }
+
+                Invoke-RestMethod -Method PUT -Uri "https://graph.microsoft.com/v1.0/users/$userId/manager/`$ref" -Headers $script:GraphHeaders -Body ($updateBody | ConvertTo-Json) -ContentType "application/json" | Out-Null
+                Write-StatusMessage -Message "Successfully set manager for user: $Identity" -Type OK
+            } else {
+                Write-StatusMessage -Message "User '$Identity' not found in Microsoft Graph after $maxRetries attempts." -Type WARN
+            }
+        } else {
+            Write-StatusMessage -Message "Manager '$ManagerInput' not found in Microsoft Graph." -Type WARN
+        }
+
+    } catch {
+        Write-StatusMessage -Message "Failed to set manager for user: $Identity - $_" -Type ERROR
+    }
+}
+
+function Set-UserLicenses {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]
+        $User,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [object[]]$License,
+
+        [Parameter()]
+        [switch]$Required,
+
+        [Parameter()]
+        [int]$MaxRetries = 3,
+
+        [Parameter()]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    try {
+        $licenseType = if ($Required) { "required" } else { "ancillary" }
+        Write-StatusMessage -Message "Starting $licenseType license assignment for user: $($User.displayName)" -Type INFO
+
+        $totalLicenses = $License.Count
+        $currentLicense = 0
+
+        foreach ($lic in $License) {
+            $currentLicense++
+            Write-StatusMessage -Message "Processing license $currentLicense of $($totalLicenses): $($lic.DisplayName)" -Type INFO
+
+            # Validate license object
+            if (-not $lic.SkuId) {
+                $errorMsg = "Invalid license object: Missing SkuId"
+                if ($Required) {
+                    Write-StatusMessage -Message $errorMsg -Type ERROR
+                    Exit-Script -Message $errorMsg -ExitCode GeneralError
+                } else {
+                    Write-StatusMessage -Message $errorMsg -Type WARN
+                    continue
+                }
+            }
+
+            $retryCount = 0
+            $licenseAssigned = $false
+
+            do {
+                try {
+                    Write-StatusMessage -Message "Attempting to assign license: $($lic.DisplayName) (Attempt $($retryCount + 1) of $MaxRetries)" -Type INFO
+                    # Assign the license
+                    $licenseBody = @{
+                        addLicenses    = @(@{ skuId = $lic.SkuId })
+                        removeLicenses = @()
+                    } | ConvertTo-Json -Depth 3
+
+                    $uri = "https://graph.microsoft.com/v1.0/users/$($User.Id)/assignLicense"
+                    $response = Invoke-RestMethod -Method POST -Uri $uri -Headers $script:GraphHeaders -Body $licenseBody -ContentType "application/json" -ErrorAction Stop
+
+                    # Wait a moment for the license to be processed
+                    Write-StatusMessage -Message "License POST accepted, waiting for replication before verifying..." -Type INFO
+                    Start-Sleep -Seconds 10
+
+                    # Verify license assignment
+                    $getSku = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/users/$($User.Id)/licenseDetails" -Headers $script:GraphHeaders -ErrorAction Stop
+
+                    if ($getSku.value.skuId -contains $lic.SkuId) {
+                        $licenseAssigned = $true
+                        Write-StatusMessage -Message "Successfully assigned license: $($lic.DisplayName)" -Type OK
+                        break
+                    } else {
+                        $retryCount++
+                        if ($retryCount -lt $MaxRetries) {
+                            Write-StatusMessage -Message "License verification failed, retrying ($retryCount of $MaxRetries)..." -Type WARN
+                            Start-Sleep -Seconds $RetryDelaySeconds
+                        }
+                    }
+                } catch {
+                    $retryCount++
+
+                    # 400 can mean "already assigned" — verify before retrying
+                    try {
+                        $verifySku = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/users/$($User.Id)/licenseDetails" -Headers $script:GraphHeaders -ErrorAction Stop
+                        if ($verifySku.value.skuId -contains $lic.SkuId) {
+                            $licenseAssigned = $true
+                            Write-StatusMessage -Message "License already present on user: $($lic.DisplayName)" -Type OK
+                            break
+                        }
+                    } catch {
+                        # Ignore verification errors; fall through to normal retry logic
+                    }
+
+                    if ($retryCount -lt $MaxRetries) {
+                        Write-StatusMessage -Message "Error assigning license (attempt $retryCount of $MaxRetries): $($_.Exception.Message)" -Type WARN
+                        Start-Sleep -Seconds $RetryDelaySeconds
+                    } else {
+                        throw
+                    }
+                }
+            } while ($retryCount -lt $MaxRetries)
+
+            if (-not $licenseAssigned) {
+                $errorMsg = "Failed to assign license $($lic.DisplayName) after $MaxRetries attempts"
+                if ($Required) {
+                    Write-StatusMessage -Message $errorMsg -Type ERROR
+                    Exit-Script -Message $errorMsg -ExitCode GeneralError
+                } else {
+                    Write-StatusMessage -Message $errorMsg -Type WARN
+                }
+            }
+        }
+    } catch {
+        $errorMsg = "Error in Set-UserLicenses: $($_.Exception.Message)"
+        if ($Required) {
+            Write-StatusMessage -Message $errorMsg -Type ERROR
+            Exit-Script -Message $errorMsg -ExitCode GeneralError
+        } else {
+            Write-StatusMessage -Message $errorMsg -Type WARN
+        }
+    }
+}
+
+function Wait-ForMailbox {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Email,
+
+        [int]$MaxWaitTime = 300, # Max wait time in seconds (3 minutes)
+        [int]$Interval = 30 # Interval between checks in seconds (30 seconds)
+    )
+
+    Write-StatusMessage -Message "Waiting for mailbox to be created for $Email..." -Type INFO
+    $elapsedTime = 0
+
+    while ($elapsedTime -lt $MaxWaitTime) {
+        try {
+            $getMailbox = Get-Mailbox -Identity $Email -ErrorAction Stop
+            if ($getMailbox) {
+                Write-StatusMessage -Message "Mailbox found for $Email" -Type OK
+                return $true
+            }
+        } catch {
+            Write-StatusMessage -Message "$Email not found. Retrying in $Interval seconds..." -Type INFO
+        }
+
+        Start-Sleep -Seconds $Interval
+        $elapsedTime += $Interval
+    }
+
+    Write-StatusMessage -Message "Timeout reached. Mailbox for $Email was not found within $MaxWaitTime seconds." -Type WARN
+    return $false
+}
+
+function Get-PaginatedGraphResponse {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('GET', 'POST', 'PUT', 'DELETE', 'PATCH')]
+        [string]$Method = "GET",
+
+        [Parameter(Mandatory = $false)]
+        [object]$Body = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ContentType = "application/json",
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    try {
+        $allResults = [System.Collections.Generic.List[object]]::new()
+        $nextLink = $Uri
+        $pageCount = 0
+
+        while ($nextLink) {
+            $retryCount = 0
+            $success = $false
+
+            do {
+                try {
+                    $pageCount++
+                    Write-StatusMessage -Message "Fetching page $pageCount..." -Type INFO
+
+                    $irmParams = @{ Uri = $nextLink; Method = $Method; Headers = $script:GraphHeaders; ErrorAction = 'Stop' }
+                    if ($Body) { $irmParams.Body = $Body; $irmParams.ContentType = $ContentType }
+                    $response = Invoke-RestMethod @irmParams
+                    $success = $true
+
+                    # Handle the response based on its structure
+                    if ($response.value) {
+                        $allResults.AddRange($response.value)
+                        Write-StatusMessage -Message "Retrieved $($response.value.Count) items" -Type INFO
+                    } else {
+                        $allResults.Add($response)
+                    }
+
+                    # Check for next page
+                    $nextLink = $response.'@odata.nextLink'
+
+                    # Add a small delay between requests to prevent rate limiting
+                    if ($nextLink) {
+                        Start-Sleep -Milliseconds 100
+                    }
+                } catch {
+                    $retryCount++
+                    if ($retryCount -lt $MaxRetries) {
+                        Write-StatusMessage -Message "Attempt $retryCount of $MaxRetries failed: $($_.Exception.Message)" -Type WARN
+                        Start-Sleep -Seconds $RetryDelaySeconds
+                    } else {
+                        throw
+                    }
+                }
+            } while (-not $success -and $retryCount -lt $MaxRetries)
+        }
+
+        # Remove duplicates based on ID
+        $uniqueResults = $allResults | Group-Object -Property id | ForEach-Object { $_.Group | Select-Object -First 1 }
+        Write-StatusMessage -Message "Retrieved $($uniqueResults.Count) unique items" -Type INFO
+
+        return $uniqueResults
+    } catch {
+        Write-StatusMessage -Message "Failed to get paginated response: $($_.Exception.Message)" -Type ERROR
+        throw
+    }
+}
+
+function Get-CopyUserGroups {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$userToCopy,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    Write-StatusMessage -Message "Starting group collection from copy user" -Type INFO
+
+    try {
+        $encodedFilter = [uri]::EscapeDataString("mail eq '$userToCopy'")
+        $uri = "https://graph.microsoft.com/v1.0/users?`$filter=$encodedFilter"
+
+        $retryCount = 0
+        $success = $false
+
+        do {
+            try {
+                $userResponse = Invoke-RestMethod -Method GET -Uri $uri -Headers $script:GraphHeaders -ErrorAction Stop
+                $success = $true
+            } catch {
+                $retryCount++
+                if ($retryCount -lt $MaxRetries) {
+                    Write-StatusMessage -Message "Attempt $retryCount of $MaxRetries failed: $($_.Exception.Message)" -Type WARN
+                    Start-Sleep -Seconds $RetryDelaySeconds
+                } else {
+                    throw
+                }
+            }
+        } while (-not $success -and $retryCount -lt $MaxRetries)
+
+        if (-not $userResponse.value -or $userResponse.value.Count -eq 0) {
+            Write-StatusMessage -Message "User '$userToCopy' not found" -Type WARN
+            return
+        }
+
+        if ($userResponse.value.Count -gt 1) {
+            Write-StatusMessage -Message "Multiple users found for '$userToCopy', skipping" -Type WARN
+            return
+        }
+
+        $copyUser = $userResponse.value[0]
+        $uri = "https://graph.microsoft.com/v1.0/users/$($copyUser.id)/memberOf"
+        $response = Get-PaginatedGraphResponse -Uri $uri -Method GET
+
+        if (-not $response -or $response.Count -eq 0) {
+            Write-StatusMessage -Message "No groups found for user '$userToCopy'" -Type WARN
+            return
+        }
+
+        $filteredGroups = $response | Where-Object {
+            $_.'@odata.type' -eq "#microsoft.graph.group" -and
+            -not ($_.groupTypes -contains 'DynamicMembership') -and
+            -not $_.onPremisesSyncEnabled
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                id          = $_.id
+                displayName = $_.displayName
+                mail        = $_.mail
+                groupType   = if ($_.groupTypes -contains "Unified") {
+                    "Unified"
+                } elseif ($_.mailEnabled -and $_.securityEnabled) {
+                    "Mail-Enabled Security"
+                } elseif ($_.securityEnabled) {
+                    "Security"
+                } elseif ($_.mailEnabled) {
+                    "Distribution"
+                } else {
+                    "Unknown"
+                }
+            }
+        }
+
+        Write-StatusMessage -Message "Found $($filteredGroups.Count) groups for user '$userToCopy'" -Type INFO
+        return $filteredGroups
+    } catch {
+        Write-StatusMessage -Message "Failed to get groups from copy user '$userToCopy': $($_.Exception.Message)" -Type ERROR
+        return
+    }
+}
+
+function Get-DepartmentGroups {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$departments,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$DepartmentMappings
+    )
+
+    try {
+        $departments += 'All'
+        $groupsToAdd = @()
+        $invalidDepartments = @()
+
+        foreach ($department in $departments) {
+            if ($DepartmentMappings.ContainsKey($department)) {
+                $groupsToAdd += $DepartmentMappings[$department]
+                Write-StatusMessage -Message "Found groups for department '$department'" -Type INFO
+            } else {
+                $invalidDepartments += $department
+                Write-StatusMessage -Message "No predefined groups for department '$department'" -Type WARN
+            }
+        }
+
+        if ($groupsToAdd.Count -eq 0) {
+            Write-StatusMessage -Message "No groups found for specified departments" -Type WARN
+            return
+        }
+
+        $groupFilters = $groupsToAdd | ForEach-Object { "displayName eq '$_'" }
+        $filterQuery = "($($groupFilters -join ' or '))"
+        $encodedFilter = [uri]::EscapeDataString($filterQuery)
+        $uri = "https://graph.microsoft.com/v1.0/groups?`$filter=$encodedFilter"
+
+        $response = Get-PaginatedGraphResponse -Uri $uri -Method GET
+
+        $filteredGroups = $response | Where-Object {
+            -not $_.onPremisesSyncEnabled
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                id          = $_.id
+                displayName = $_.displayName
+                mail        = $_.mail
+                groupType   = if ($_.groupTypes -contains "Unified") {
+                    "Unified"
+                } elseif ($_.mailEnabled -and $_.securityEnabled) {
+                    "Mail-Enabled Security"
+                } elseif ($_.securityEnabled) {
+                    "Security"
+                } elseif ($_.mailEnabled) {
+                    "Distribution"
+                } else {
+                    "Unknown"
+                }
+            }
+        }
+
+        Write-StatusMessage -Message "Found $($filteredGroups.Count) department groups" -Type INFO
+        return $filteredGroups
+    } catch {
+        Write-StatusMessage -Message "Failed to fetch department groups: $($_.Exception.Message)" -Type ERROR
+        return
+    }
+}
+
+function Add-UserToGroups {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [array]$Groups,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$UserId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    # Initialize counters and tracking
+    $successCount = 0
+    $failureCount = 0
+    $failedGroups = @()
+
+    # Separate groups by type
+    $graphGroups = $Groups | Where-Object { $_.GroupType -eq 'Unified' -or $_.GroupType -eq 'Security' }
+    $exchangeGroups = $Groups | Where-Object { $_.GroupType -eq 'Distribution' -or $_.GroupType -eq 'Mail-Enabled Security' }
+    $unknownGroups = $Groups | Where-Object { $_.GroupType -notin @('Unified', 'Security', 'Distribution', 'Mail-Enabled Security') }
+
+    Write-StatusMessage -Message "Starting group assignments: $($graphGroups.Count) Graph groups, $($exchangeGroups.Count) Exchange groups" -Type INFO
+
+    # Process Graph groups
+    if ($graphGroups.Count -gt 0) {
+        Write-StatusMessage -Message "Processing Graph groups..." -Type INFO
+
+        foreach ($group in $graphGroups) {
+            $retryCount = 0
+            $success = $false
+
+            do {
+                try {
+                    Write-StatusMessage -Message "Processing Graph group: $($group.DisplayName)" -Type INFO
+
+                    $uri = "https://graph.microsoft.com/v1.0/groups/$($group.Id)/members/`$ref"
+                    $body = @{
+                        "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$userId"
+                    } | ConvertTo-Json
+
+                    Invoke-RestMethod -Uri $uri -Method POST -Headers $script:GraphHeaders -Body $body -ContentType "application/json" -ErrorAction Stop
+                    $success = $true
+                    $successCount++
+                    Write-StatusMessage -Message "Successfully added user to Graph group: $($group.DisplayName)" -Type OK
+                } catch {
+                    $retryCount++
+                    if ($retryCount -lt $MaxRetries) {
+                        # Check for specific Graph API errors
+                        $errorMessage = $_.Exception.Message
+                        if ($errorMessage -like "*Request_ResourceNotFound*") {
+                            Write-StatusMessage -Message "Group '$($group.DisplayName)' not found in Graph API" -Type WARN
+                        } elseif ($errorMessage -like "*Request_BadRequest*") {
+                            Write-StatusMessage -Message "Invalid request for group '$($group.DisplayName)': $errorMessage" -Type WARN
+                        } else {
+                            Write-StatusMessage -Message "Attempt $retryCount of $MaxRetries failed for Graph group '$($group.DisplayName)': $errorMessage" -Type WARN
+                        }
+                        Start-Sleep -Seconds $RetryDelaySeconds
+                    } else {
+                        $failureCount++
+                        $failedGroups += $group.DisplayName
+                        Write-StatusMessage -Message "Failed to add user to Graph group '$($group.DisplayName)' after $MaxRetries attempts: $($_.Exception.Message)" -Type ERROR
+                        $success = $true
+                    }
+                }
+            } while (-not $success -and $retryCount -lt $MaxRetries)
+
+            # Add a small delay between groups to prevent overwhelming Graph API
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
+    # Process Exchange groups
+    if ($exchangeGroups.Count -gt 0) {
+        Write-StatusMessage -Message "Processing Exchange groups..." -Type INFO
+
+        foreach ($group in $exchangeGroups) {
+            $retryCount = 0
+            $success = $false
+
+            do {
+                try {
+                    Write-StatusMessage -Message "Processing Exchange group: $($group.DisplayName)" -Type INFO
+
+                    if ($group.mail) {
+                        Add-DistributionGroupMember -Identity $group.mail -Member $userId -BypassSecurityGroupManagerCheck -ErrorAction Stop
+                        $success = $true
+                        $successCount++
+                        Write-StatusMessage -Message "Successfully added user to Exchange group: $($group.DisplayName)" -Type OK
+                    } else {
+                        throw "Group does not have a mail address"
+                    }
+                } catch {
+                    $retryCount++
+                    if ($retryCount -lt $MaxRetries) {
+                        Write-StatusMessage -Message "Attempt $retryCount of $MaxRetries failed for Exchange group '$($group.DisplayName)': $($_.Exception.Message)" -Type WARN
+                        Start-Sleep -Seconds $RetryDelaySeconds
+                    } else {
+                        $failureCount++
+                        $failedGroups += $group.DisplayName
+                        Write-StatusMessage -Message "Failed to add user to Exchange group '$($group.DisplayName)' after $MaxRetries attempts: $($_.Exception.Message)" -Type ERROR
+                        break
+                    }
+                }
+            } while (-not $success -and $retryCount -lt $MaxRetries)
+
+            # Add a small delay between groups to prevent overwhelming Exchange
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    # Handle unknown group types
+    if ($unknownGroups.Count -gt 0) {
+        Write-StatusMessage -Message "Skipping $($unknownGroups.Count) unknown group types" -Type WARN
+        foreach ($group in $unknownGroups) {
+            Write-StatusMessage -Message "Unknown group type: $($group.DisplayName) ($($group.GroupType))" -Type WARN
+        }
+    }
+
+    # Output summary
+    Write-StatusMessage -Message "Group assignment summary: $successCount successful, $failureCount failed" -Type INFO
+    if ($failedGroups.Count -gt 0) {
+        Write-StatusMessage -Message "Failed groups: $($failedGroups -join ', ')" -Type WARN
+    }
+
+    # Return both success and failure information
+    return [PSCustomObject]@{
+        SuccessCount = $successCount
+        FailureCount = $failureCount
+        FailedGroups = $failedGroups
+    }
+}
+
+function Add-UserToRequiredGroups {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]
+        $User,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Groups  # Display names or email addresses
+    )
+
+    # Fetch current memberships once (paginate through all pages)
+    $currentGroups = @()
+    $memberOfUri = "https://graph.microsoft.com/v1.0/users/$($User.id)/memberOf"
+    do {
+        $response = Invoke-RestMethod -Method GET -Uri $memberOfUri -Headers $script:GraphHeaders -ErrorAction Stop
+        $currentGroups += $response.value
+        $memberOfUri = $response.'@odata.nextLink'
+    } while ($memberOfUri)
+
+    foreach ($groupIdentifier in $Groups) {
+        # Determine filter type based on whether it looks like an email
+        if ($groupIdentifier -match '^[\w\.\-]+@[\w\.\-]+\.\w+$') {
+            $filter = "mail eq '$groupIdentifier'"
+        } else {
+            $filter = "displayName eq '$groupIdentifier'"
+        }
+
+        # Look up the group to get its ID
+        $encodedFilter = [uri]::EscapeDataString($filter)
+        $groupLookup = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=$encodedFilter" -Headers $script:GraphHeaders -ErrorAction Stop
+        $group = $groupLookup.value | Select-Object -First 1
+
+        if ($null -eq $group) {
+            Write-StatusMessage -Message "Group '$groupIdentifier' not found in directory. Skipping." -Type WARN
+            continue
+        }
+
+        # Skip on-premises synced groups — membership is managed by on-prem AD
+        if ($group.onPremisesSyncEnabled -eq $true) {
+            Write-StatusMessage -Message "Group '$($group.displayName)' is synced from on-premises AD. Skipping." -Type WARN
+            continue
+        }
+
+        # Skip dynamic membership groups — members cannot be added manually
+        if ($group.groupTypes -contains 'DynamicMembership') {
+            Write-StatusMessage -Message "Group '$($group.displayName)' uses dynamic membership. Skipping." -Type WARN
+            continue
+        }
+
+        $groupType = if ($group.groupTypes -contains 'Unified') {
+            'Unified'
+        } elseif ($group.mailEnabled -and $group.securityEnabled) {
+            'Mail-Enabled Security'
+        } elseif ($group.securityEnabled) {
+            'Security'
+        } elseif ($group.mailEnabled) {
+            'Distribution'
+        } else {
+            'Unknown'
+        }
+
+        # Check membership by ID
+        $isMember = $currentGroups | Where-Object { $_.id -eq $group.id }
+        if ($null -eq $isMember) {
+            Write-StatusMessage -Message "Adding user $($User.DisplayName) to '$($group.displayName)' ($groupType)." -Type INFO
+
+            if ($groupType -in @('Unified', 'Security')) {
+                try {
+                    $groupAddUri = "https://graph.microsoft.com/v1.0/groups/$($group.id)/members/`$ref"
+                    Invoke-RestMethod -Method POST -Uri $groupAddUri -Headers $script:GraphHeaders -Body (@{ "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$($User.id)" } | ConvertTo-Json) -ContentType "application/json" | Out-Null
+                    Write-StatusMessage -Message "Successfully added $($User.DisplayName) to '$($group.displayName)'." -Type OK
+                } catch {
+                    Write-StatusMessage -Message "Failed to add $($User.DisplayName) to '$($group.displayName)': $($_.Exception.Message)" -Type WARN
+                }
+            } elseif ($groupType -in @('Distribution', 'Mail-Enabled Security')) {
+                try {
+                    Add-DistributionGroupMember -Identity $group.mail -Member $User.Mail -ErrorAction Stop
+                    Write-StatusMessage -Message "Successfully added $($User.DisplayName) to '$($group.displayName)' via Exchange Online." -Type OK
+                } catch {
+                    Write-StatusMessage -Message "Failed to add $($User.DisplayName) to '$($group.displayName)' via Exchange Online: $($_.Exception.Message)" -Type WARN
+                }
+            } else {
+                Write-StatusMessage -Message "Group '$($group.displayName)' has unsupported type '$groupType'. Skipping." -Type WARN
+            }
+        } else {
+            Write-StatusMessage -Message "User $($User.DisplayName) is already a member of '$($group.displayName)' ($groupType). Skipping." -Type INFO
+        }
+    }
+}
+
+function Set-UserBookWithMeId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]
+        $User,
+
+        [Parameter()]
+        [int]$MaxRetries = 6,
+
+        [Parameter()]
+        [int]$RetryIntervalSeconds = 30
+    )
+
+    try {
+        Write-StatusMessage -Message "Configuring BookWithMeId for $($User.displayName)" -Type INFO
+
+        # Get Exchange GUID with retry logic
+        $retryCount = 0
+        $mailbox = $null
+        $success = $false
+
+        do {
+            try {
+                # Ensure we resolve to a single user mailbox by exact PrimarySmtpAddress
+                $mailbox = Get-Mailbox -Identity $($User.id)
+
+                if ($mailbox) {
+                    $success = $true
+                    Write-StatusMessage -Message "Retrieved mailbox successfully" -Type OK
+                    break
+                }
+            } catch {
+                $retryCount++
+                if ($retryCount -ge $MaxRetries) {
+                    Write-StatusMessage -Message "Failed to get mailbox after $MaxRetries attempts" -Type WARN
+                    return
+                }
+                Write-StatusMessage -Message "Mailbox not ready, attempt $retryCount of $MaxRetries. Waiting $RetryIntervalSeconds seconds..." -Type INFO
+                Start-Sleep -Seconds $RetryIntervalSeconds
+            }
+        } while ($retryCount -lt $MaxRetries)
+
+        if (-not $success) {
+            Write-StatusMessage -Message "Failed to get mailbox after all retries" -Type WARN
+            return
+        }
+
+        # Get Exchange GUID
+        $exchangeGuid = $mailbox.ExchangeGuid.Guid
+        if ([string]::IsNullOrEmpty($exchangeGuid)) {
+            Write-StatusMessage -Message "Exchange GUID not found for $($User.displayName)" -Type WARN
+            return
+        }
+
+        # Generate BookWithMeId
+        $formattedGuid = $exchangeGuid -replace "-"
+        $bookWithMeId = "${formattedGuid}@compassmsp.com?anonymous&ep=plink"
+
+        if ($bookWithMeId -eq '@compassmsp.com?anonymous&ep=plink') {
+            Write-StatusMessage -Message "Generated BookWithMeId is invalid (missing ExchangeGuid)" -Type WARN
+            Write-StatusMessage -Message "Please add BookWithMeId to extensionAttribute15 manually for $SamAccountName" -Type WARN
+            return
+        }
+
+        # Set mailbox extension attribute
+        try {
+            Set-Mailbox -Identity $($User.id) -CustomAttribute15 $bookWithMeId -ErrorAction Stop
+            Write-StatusMessage -Message "Successfully set BookWithMeId for $($User.displayName)" -Type OK
+        } catch {
+            Write-StatusMessage -Message "Failed to set CustomAttribute15: $_" -Type WARN
+            Write-StatusMessage -Message "Please set BookWithMeId ($bookWithMeId) manually for $($User.displayName)" -Type WARN
+        }
+
+
+    } catch {
+        Write-StatusMessage -Message "Error in Set-UserBookWithMeId: $_" -Type WARN
+    }
+}
+
+function Get-ConnectWiseManageToken {
+    param (
+        [string]$CompanyId,
+        [string]$PublicKey,
+        [string]$PrivateKey,
+        [string]$clientId
+    )
+
+    # Encode companyId+publicKey:privateKey in Base64
+    $pair = "$CompanyId+$PublicKey`:$PrivateKey"
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($pair)
+    $base64 = [Convert]::ToBase64String($bytes)
+
+    # Create headers with Basic authentication
+    $headers = @{
+        "Authorization" = "Basic $base64"
+        "Content-Type"  = "application/json"
+        "ClientId"      = $clientId
+    }
+
+    return $headers
+}
+
+function Invoke-ConnectWiseManageAPI {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]$Method,
+
+        [Parameter(Mandatory)]
+        [string]$Endpoint,
+        [string]$Conditions,
+        [Parameter(Mandatory)]
+        [hashtable]$Headers,
+
+        [object]$Body,
+
+        [string]$BaseUrl = "https://service.mycompass.cloud",
+        [string]$Version = "v4_6_release/apis/3.0",
+        [string]$ContentType = 'application/json',
+
+        [switch]$NoPagination,
+        [int]$PageSize = 1000
+    )
+
+    try {
+        $Endpoint = $Endpoint.Trim('/')
+        if ($Conditions) {
+            $encodedConditions = [Uri]::EscapeDataString($Conditions)
+            $uri = "$BaseUrl/$Version/$Endpoint`?conditions=$encodedConditions"
+        } else {
+            $uri = "$BaseUrl/$Version/$Endpoint"
+        }
+
+        $bodyJson = $null
+        if ($Body) {
+            if ($Method -eq 'PATCH') {
+                $bodyJson = ConvertTo-Json -InputObject $Body -Depth 10 -Compress -AsArray
+            } else {
+                $bodyJson = ConvertTo-Json -InputObject $Body -Depth 10 -Compress
+            }
+        }
+
+        if ($Method -eq 'GET' -and -not $NoPagination) {
+            $allResults = @()
+            $page = 1
+            $hasMore = $true
+
+            while ($hasMore) {
+                $separator = if ($uri -match '\?') { '&' } else { '?' }
+                $pageUri = "$uri${separator}page=$page&pageSize=$PageSize"
+                Write-Verbose "Fetching page $($page): $pageUri"
+
+                $response = Invoke-RestMethod -Method $Method -Uri $pageUri -Headers $Headers -ErrorAction Stop
+
+                if ($response) { $allResults += $response }
+
+                if ($response.Count -lt $PageSize) { $hasMore = $false } else { $page++ }
+            }
+
+            return @{
+                Success = $true
+                Content = $allResults
+                JSON    = $allResults | ConvertTo-Json -Depth 10
+            }
+        } else {
+            $response = Invoke-RestMethod -Method $Method -Uri $uri -Headers $Headers -ContentType $ContentType -Body $bodyJson -ErrorAction Stop
+            return @{
+                Success = $true
+                Content = $response
+                JSON    = if ($response) { $response | ConvertTo-Json -Depth 10 } else { $null }
+            }
+        }
+    } catch {
+        $responseBody = $_.ErrorDetails.Message
+        $errorMessage = if ($responseBody) {
+            try { ($responseBody | ConvertFrom-Json).message } catch { $_.Exception.Message }
+        } else {
+            $_.Exception.Message
+        }
+        return @{
+            Success      = $false
+            Error        = $errorMessage
+            ResponseBody = $responseBody
+        }
+    }
+}
+
+function New-ConnectwisePSAMember {
+    param (
+        [Parameter(Mandatory)]
+        [string]$TemplateUserEmail,
+        [Parameter(Mandatory)]
+        [hashtable]$NewUser, # Expecting properties: GivenName, Surname, Mail, JobTitle, MobilePhone, officeLocation
+        [Parameter(Mandatory)]
+        [DateTime]$NewUserHireDate,
+        [Parameter(Mandatory)]
+        [string]$NewUserPassword,
+        [Parameter(Mandatory)]
+        [hashtable]$Headers
+    )
+
+    try {
+
+        # Get template member details
+        $getTemplateMemberParameters = @{
+            Method     = 'GET'
+            Headers    = $Headers
+            Endpoint   = "system/members"
+            Conditions = "officeemail='$TemplateUserEmail' AND inactiveFlag=false"
+        }
+
+        $templateMember = Invoke-ConnectWiseManageAPI @getTemplateMemberParameters
+
+        if ($templateMember.Content.Count -gt 1) {
+            return @{
+                Success = $false
+                Error   = [System.Exception]::new("API returned multiple active members. Please ensure the template user is valid.")
+            }
+        }
+
+        if (-not $templateMember.Content) {
+            return @{
+                Success = $false
+                Reason  = 'NotFound'
+                Error   = [System.Exception]::new("No active template member found with email: $TemplateUserEmail")
+            }
+        }
+
+        # Check if user is in Professional Services department
+        $IsProfessionalServices = $false
+
+        if ($newUser.officeLocation -eq "Professional Services") {
+            $IsProfessionalServices = $true
+        }
+
+        # Format hire date for ConnectWise
+        $formattedDate = (Get-Date $NewUserHireDate -Format "yyyy-MM-dd")
+
+        # Format PSA Member Identifier based on 15 char limit
+        $emailPrefix = (($newUser.mail -split '@')[0]).ToLower()
+        $newUserIdentifier = if ($emailPrefix.Length -le 15) {
+            $emailPrefix
+        } else {
+            $initialsFormat = "$($newUser.GivenName[0].ToString().ToLower())$($newUser.Surname.ToLower())"
+            $initialsFormat.Substring(0, [Math]::Min(15, $initialsFormat.Length))
+        }
+
+        # Create new member properties
+        $newMember = @{
+            identifier                       = $newUserIdentifier
+            firstName                        = $newUser.GivenName
+            lastName                         = $newUser.Surname
+            hireDate                         = $formattedDate
+            timeSheetStartDate               = $formattedDate
+            officeEmail                      = $newUser.Mail
+            primaryEmail                     = $newUser.Mail
+            title                            = $newUser.JobTitle
+            Password                         = $NewUserPassword
+            defaultPhone                     = 'Office'
+            defaultEmail                     = 'Office'
+            licenseClass                     = 'F' # F is for regular user license
+            # Required Properties
+            mapiName                         = $newUser.Mail
+            calendarSyncIntegrationFlag      = $templatemember.Content.calendarSyncIntegrationFlag
+            companyActivityTabFormat         = $templateMember.Content.companyActivityTabFormat
+            invoiceTimeTabFormat             = $templateMember.Content.invoiceTimeTabFormat
+            invoiceScreenDefaultTabFormat    = $templateMember.Content.invoiceScreenDefaultTabFormat
+            invoicingDisplayOptions          = $templateMember.Content.invoicingDisplayOptions
+            agreementInvoicingDisplayOptions = $templateMember.Content.agreementInvoicingDisplayOptions
+        }
+
+        # Function to add properties only if they exist
+        function Add-IfExists {
+            param ($HashTable, $Key, $Value)
+
+            if ($null -eq $Value -or $Value -eq '') {
+                return
+            }
+
+            # Fields that MUST be arrays
+            $arrayFields = @(
+                'serviceBoardTeamIds',
+                'excludedServiceBoardIds',
+                'excludedProjectBoardIds',
+                'teams',
+                'memberPersonas'
+            )
+
+            if ($arrayFields -contains $Key) {
+                $HashTable[$Key] = @($Value)
+            } else {
+                $HashTable[$Key] = $Value
+            }
+        }
+
+        # Copy properties from the template if they exist
+        $templateProperties = @(
+            "country", "officePhone", "securityRole", "enableMobileFlag", "type",
+            "timeZone", "partnerPortalFlag", "toastNotificationFlag", "memberPersonas",
+            "adminFlag", "structureLevel", "securityLocation", "defaultLocation",
+            "defaultDepartment", "reportsTo", "restrictLocationFlag", "restrictDepartmentFlag",
+            "workRole", "timeApprover", "expenseApprover", "includeInUtilizationReportingFlag",
+            "requireExpenseEntryFlag", "requireTimeSheetEntryFlag", "requireStartAndEndTimeOnTimeEntryFlag",
+            "allowInCellEntryOnTimeSheet", "enterTimeAgainstCompanyFlag",
+            "allowExpensesEnteredAgainstCompaniesFlag", "timeReminderEmailFlag",
+            "serviceDefaultLocation", "serviceDefaultDepartment", "serviceDefaultBoard",
+            "excludedServiceBoardIds", "teams", "serviceBoardTeamIds",
+            "projectDefaultLocation", "projectDefaultDepartment", "projectDefaultBoard",
+            "excludedProjectBoardIds", "scheduleDefaultLocation", "scheduleDefaultDepartment",
+            "scheduleCapacity", "serviceLocation", "calendar", "salesDefaultLocation",
+            "warehouse", "warehouseBin"
+        )
+
+        foreach ($prop in $templateProperties) {
+            Add-IfExists -HashTable $newMember -Key $prop -Value $templateMember.Content.$prop
+        }
+
+        # Create new member
+        $createResult = Invoke-ConnectWiseManageAPI -Method 'POST' -Headers $headers -Endpoint "system/members" -Body $newMember
+        if (-not $createResult.Success) {
+            return @{
+                Success      = $false
+                Error        = $createResult.Error
+                ResponseBody = $createResult.ResponseBody
+            }
+        }
+
+        # Set as Professional Services (Primary Engineer) if needed
+        if ($IsProfessionalServices) {
+
+            # Fetch the current options
+            $getCustomFields = Invoke-ConnectWiseManageAPI -Method 'GET' -Headers $headers -Endpoint "system/userDefinedFields"
+            $selectCustomField = $getCustomFields.Content | Where-Object { $_.caption -eq 'Primary Engineer' }
+            $getUserDefinedFields = Invoke-ConnectWiseManageAPI -Method 'GET' -Headers $headers -Endpoint "system/userDefinedFields/$($selectCustomField.Id)"
+
+            # Get the highest existing sort order
+            $sortOrder = ([int]($getUserDefinedFields.Content.options.sortOrder | Measure-Object -Maximum).Maximum)
+
+            # Clone the full field definition and append the new option to the existing list.
+            # PATCH is not supported on this endpoint in API 2026.5 — PUT requires the complete definition.
+            $updatedField = $getUserDefinedFields.Content | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+            $updatedField['options'] = @($getUserDefinedFields.Content.options) + @(
+                [PSCustomObject]@{
+                    optionValue  = $NewUser.DisplayName
+                    defaultFlag  = $false
+                    inactiveFlag = $false
+                    sortOrder    = $sortOrder + 1
+                }
+            )
+
+            # PUT the complete updated definition
+            $engineerResult = Invoke-ConnectWiseManageAPI -Method 'PUT' -Headers $headers -Endpoint "system/userDefinedFields/$($selectCustomField.Id)" -Body $updatedField
+
+            # EngineerResult attached to return; caller handles success/failure messaging
+
+        }
+
+        # Attach engineerResult onto createResult if it was set
+        if ($engineerResult) {
+            $createResult['EngineerResult'] = $engineerResult
+        }
+        return $createResult
+
+    } catch {
+        return @{
+            Success = $false
+            Error   = $_.Exception
+        }
+    }
+}
+
+function Invoke-ConnectWiseHomeActivation {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]
+        $User,
+
+
+        [Parameter(Mandatory)]
+        [hashtable]$Headers,
+
+        [Parameter()]
+        [int]$MaxGraphPages = 5,
+
+        [Parameter()]
+        [int]$MaxRetries = 3,
+
+        [Parameter()]
+        [int]$RetryDelaySec = 3
+    )
+
+    function Invoke-WithRetry {
+        param(
+            [scriptblock]$ScriptBlock,
+            [int]$Retries = 3,
+            [int]$DelaySec = 2,
+            [string]$ActionName = "Operation"
+        )
+
+        for ($i = 1; $i -le $Retries; $i++) {
+            try {
+                return & $ScriptBlock
+            } catch {
+                if ($i -eq $Retries) {
+                    throw "$ActionName failed after $Retries attempts. Last error: $($_.Exception.Message)"
+                }
+                Start-Sleep -Seconds $DelaySec
+            }
+        }
+    }
+
+    $confirmCWHome = Show-OkCancelDialog `
+        -Message 'Log in to ConnectWise Home and create the user to trigger the activation email. Click OK when completed.'
+
+    if (-not $confirmCWHome) {
+        Write-StatusMessage -Message "Cancelled. Skipping ConnectWise activation flow." -Type WARN
+        return $false
+    }
+
+    try {
+        Write-StatusMessage -Message "Searching for ConnectWise activation email in $($User.DisplayName) mailbox..." -Type INFO
+
+        $allMessages = @()
+        $nextLink = "https://graph.microsoft.com/v1.0/users/$($User.Id)/messages?`$top=25&`$orderby=receivedDateTime desc"
+
+        for ($page = 0; $page -lt $MaxGraphPages -and $nextLink; $page++) {
+
+            $response = Invoke-WithRetry -ActionName "Graph message fetch" -Retries $MaxRetries -DelaySec $RetryDelaySec -ScriptBlock {
+                Invoke-RestMethod -Method GET -Uri $nextLink -Headers $GraphHeaders
+            }
+
+            if ($response.value) {
+                $allMessages += $response.value
+            }
+
+            $nextLink = $response.'@odata.nextLink'
+        }
+
+        $message = $allMessages |
+        Where-Object {
+            $_.subject -match "ConnectWise|activation|SSO"
+        } |
+        Sort-Object receivedDateTime -Descending |
+        Select-Object -First 1
+
+        if (-not $message) {
+            throw "No ConnectWise activation email found."
+        }
+
+        if (-not $message.body.content) {
+            throw "Email body is empty."
+        }
+
+        $body = [System.Net.WebUtility]::HtmlDecode($message.body.content)
+
+        $link = $null
+
+        # Primary: anchor tag
+        $anchorMatch = [regex]::Match(
+            $body,
+            '<a[^>]+href\s*=\s*["''](?<url>https?[^"''>]+)["'']',
+            'IgnoreCase'
+        )
+
+        if ($anchorMatch.Success) {
+            $link = $anchorMatch.Groups["url"].Value
+        }
+
+        # Fallback: originalsrc
+        if (-not $link) {
+            $fallbackMatch = [regex]::Match(
+                $body,
+                'originalsrc\s*=\s*["'']([^"''>]+)',
+                'IgnoreCase'
+            )
+
+            if ($fallbackMatch.Success) {
+                $link = $fallbackMatch.Groups[1].Value
+            }
+        }
+
+        if (-not $link) {
+            throw "SSO activation link not found in email body."
+        }
+
+        $link = [System.Net.WebUtility]::HtmlDecode($link)
+
+        Write-StatusMessage -Message "Activation link extracted. Attempting ConnectWise activation..." -Type INFO
+
+        $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+        $activationResponse = Invoke-WithRetry -ActionName "ConnectWise activation" -Retries $MaxRetries -DelaySec $RetryDelaySec -ScriptBlock {
+            Invoke-WebRequest -Uri $link -MaximumRedirection 10 -WebSession $session -UseBasicParsing
+        }
+
+        if (-not $activationResponse) {
+            throw "No response from activation endpoint."
+        }
+
+        $content = $activationResponse.Content
+
+        $successPatterns = @(
+            "Email successfully confirmed",
+            "confirmed successfully",
+            "activation complete",
+            "you may now sign in"
+        )
+
+        $isSuccess = $successPatterns | ForEach-Object {
+            if ($content -match $_) { $true }
+        } | Where-Object { $_ -eq $true }
+
+        if ($isSuccess) {
+            Write-StatusMessage -Message "ConnectWise Home SSO activation confirmed" -Type OK
+            return $true
+        } else {
+            Write-StatusMessage -Message "Activation response received but success not confirmed" -Type WARN
+            Write-StatusMessage -Message "Manual verification may be required in ConnectWise Home" -Type WARN
+            return $false
+        }
+    } catch {
+        Write-StatusMessage -Message "ConnectWise activation process failed: $($_.Exception.Message)" -Type ERROR
+        return $false
+    }
+}
+
+function Start-NewUserFinalize {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]
+        $User,
+
+        [Parameter()]
+        [string]$ManagerDisplayName,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Password,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$AssignedGroupCount,
+
+        [bool]$TemplateUserCheck,
+
+        [Parameter(Mandatory)]
+        [pscustomobject]$UserInput,
+
+        [Parameter()]
+        [bool]$SkippedTemplateUserGroups = $false,
+
+        [Parameter()]
+        [hashtable]$GroupOperationSummary = @{
+            CopyUserGroups   = @{
+                Count  = 0
+                Groups = @()
+                Failed = @()
+            }
+            DepartmentGroups = @{
+                Count  = 0
+                Groups = @()
+                Failed = @()
+            }
+            TotalFailed      = 0
+        },
+        [Parameter()]
+        [hashtable]$ConnectwisePSAUserCreated
+    )
+
+    Write-StatusMessage -Message "Preparing final summary" -Type INFO
+
+    # Validate user object
+    if (-not $User.Id -or -not $User.displayName -or -not $User.mail) {
+        Write-StatusMessage -Message "Warning: User object is missing required properties" -Type WARN
+    }
+
+    # Calculate successful assignments
+    $totalSuccessful = $AssignedGroupCount - $GroupOperationSummary.TotalFailed
+
+    # Build summary parts
+    $summaryParts = @(
+        "SUMMARY OF ACTIONS",
+        "========================================",
+        "User Creation Status:",
+        "----------------------------------------",
+        "- EntraID: $($User.Id)",
+        "- Display Name: $($User.displayName)",
+        "- Email Address: $($User.mail)",
+        "- Password: $Password",
+        "- Template User: $(if ($TemplateUserCheck) {$UserInput.userToCopy} else {'No template user selected.'})",
+        "",
+        "Group Assignment Status:",
+        "----------------------------------------",
+        "- Total Groups Attempted: $AssignedGroupCount",
+        "- Successfully Added: $totalSuccessful",
+        "- Failed Additions: $($GroupOperationSummary.TotalFailed)"
+    )
+
+    # ConnectWise PSA section
+    $summaryParts += @("", "Connectwise PSA Member Creation Status:", "----------------------------------------")
+    if ($ConnectwisePSAUserCreated) {
+        $summaryParts += "- Member Creation: $($ConnectwisePSAUserCreated.Success)"
+        if ($ConnectwisePSAUserCreated.Success -eq $true) {
+            $summaryParts += "- Member ID: $($ConnectwisePSAUserCreated.Content.id)"
+            $summaryParts += "- Member Username: $($ConnectwisePSAUserCreated.Content.identifier)"
+        } elseif ($ConnectwisePSAUserCreated.Reason -eq 'NoTemplateUser') {
+            $summaryParts += "- Skipped: No template user was selected. PSA member creation was not attempted."
+        } elseif ($ConnectwisePSAUserCreated.Reason -eq 'NotFound') {
+            $summaryParts += "- Skipped: Template user not found in Connectwise PSA. This is expected if the template user does not have a Connectwise PSA account."
+            $summaryParts += "Note: If a PSA account was intended, verify the template user email is correct and that the user exists as an active member in Connectwise PSA."
+        } else {
+            $summaryParts += "- Error: $($ConnectwisePSAUserCreated.Error)"
+        }
+        if ($ConnectwisePSAUserCreated.EngineerResult) {
+            $summaryParts += "- Primary Engineer Update: $($ConnectwisePSAUserCreated.EngineerResult.Success)"
+            if (-not $ConnectwisePSAUserCreated.EngineerResult.Success) {
+                $summaryParts += "- Error: $($ConnectwisePSAUserCreated.EngineerResult.Error)"
+            }
+        }
+    } else {
+        $summaryParts += "- Connectwise PSA user creation was not attempted."
+    }
+
+    # Add group operation details
+    if ($GroupOperationSummary.CopyUserGroups.Count -gt 0) {
+        $summaryParts += @(
+            "",
+            "Template User Groups:",
+            "- Total Groups: $($GroupOperationSummary.CopyUserGroups.Count)",
+            "- Successfully Added: $($GroupOperationSummary.CopyUserGroups.Count - $GroupOperationSummary.CopyUserGroups.Failed.Count)"
+        )
+        if ($GroupOperationSummary.CopyUserGroups.Groups.Count -gt 0) {
+            $summaryParts += "- Groups: $($GroupOperationSummary.CopyUserGroups.Groups -join ', ')"
+        }
+        if ($GroupOperationSummary.CopyUserGroups.Failed.Count -gt 0) {
+            $summaryParts += "- Failed Groups: $($GroupOperationSummary.CopyUserGroups.Failed -join ', ')"
+        }
+    }
+
+    if ($GroupOperationSummary.DepartmentGroups.Count -gt 0) {
+        $summaryParts += @(
+            "",
+            "Department Groups:",
+            "- Total Groups: $($GroupOperationSummary.DepartmentGroups.Count)",
+            "- Successfully Added: $($GroupOperationSummary.DepartmentGroups.Count - $GroupOperationSummary.DepartmentGroups.Failed.Count)"
+        )
+        if ($GroupOperationSummary.DepartmentGroups.Groups.Count -gt 0) {
+            $summaryParts += "- Groups: $($GroupOperationSummary.DepartmentGroups.Groups -join ', ')"
+        }
+        if ($GroupOperationSummary.DepartmentGroups.Failed.Count -gt 0) {
+            $summaryParts += "- Failed Groups: $($GroupOperationSummary.DepartmentGroups.Failed -join ', ')"
+        }
+    }
+
+    # Add warnings and important notes
+    $warnings = @()
+
+    if ($SkippedTemplateUserGroups) {
+        $warnings += "Template group copy was skipped"
+    }
+
+    # Check for group count mismatches
+    $totalGroupsFound = $GroupOperationSummary.CopyUserGroups.Count + $GroupOperationSummary.DepartmentGroups.Count
+    if ($totalGroupsFound -ne $AssignedGroupCount) {
+        $warnings += "Group count mismatch detected: Found=$totalGroupsFound, Attempted=$AssignedGroupCount"
+    }
+
+    if ($GroupOperationSummary.TotalFailed -gt 0) {
+        $warnings += "Group assignments failed: $($GroupOperationSummary.TotalFailed) total failures"
+
+        # Add specific failure details
+        if ($GroupOperationSummary.CopyUserGroups.Failed.Count -gt 0) {
+            $warnings += "- Template user group failures: $($GroupOperationSummary.CopyUserGroups.Failed.Count)"
+        }
+        if ($GroupOperationSummary.DepartmentGroups.Failed.Count -gt 0) {
+            $warnings += "- Department group failures: $($GroupOperationSummary.DepartmentGroups.Failed.Count)"
+        }
+    }
+
+    if ($warnings.Count -gt 0) {
+        $summaryParts += @(
+            "",
+            "WARNINGS:",
+            "----------------------------------------"
+        )
+        $warnings | ForEach-Object {
+            $summaryParts += "- $_"
+        }
+    }
+
+    # Add important notes
+    $summaryParts += @(
+        "",
+        "IMPORTANT NOTES:",
+        "----------------------------------------",
+        "1. Please record this password now - it should be needed for the user's first login.",
+        "2. Verify all group assignments in the EntraID portal.",
+        "3. Check the user's mailbox status in Exchange Online.",
+        "4. Review any warnings above and take appropriate action.",
+        "5. If any group assignments failed, manual remediation may be required."
+        "6. If Connectwise PSA member creation failed, please create the member manually and assign the SSO ID to complete setup."
+    )
+
+    # Display summary
+    try {
+        $summaryMessage = $summaryParts -join "`n"
+        Write-StatusMessage -Message $summaryMessage -Type SUMMARY
+    } catch {
+        Write-StatusMessage -Message "Failed to display summary message: $_" -Type WARN
+    }
+}
+
+#EndRegion Functions
+
+Write-Host "`r  [✓] Functions loaded" -ForegroundColor Green
+
+#region Main Execution
+
+Write-Host "  [ ] Initializing progress tracking..." -NoNewline -ForegroundColor Yellow
+$progressSteps = @(
+    @{ Name = "Initialization"; Description = "Loading configuration and connecting services" }
+    @{ Name = "User Input"; Description = "Gathering new user details" }
+    @{ Name = "Validation"; Description = "Validating inputs and building user creation prerequisites" }
+    @{ Name = "New User Creation"; Description = "Creating user in Entra" }
+    @{ Name = "License Assignment"; Description = "Assigning licenses" }
+    @{ Name = "Mailbox Provisioning"; Description = "Waiting for Exchange to provision mailbox" }
+    @{ Name = "Set Timezone"; Description = "Setting Timezone for new user" }
+    @{ Name = "Entra Group Assignment"; Description = "Assigning Entra Groups" }
+    @{ Name = "Managed Service Mailbox Assignment"; Description = "Assigning access rights for managedservices mailbox" }
+    @{ Name = "Connectwise PSA Member Creation"; Description = "Creating Connectwise PSA member" }
+    @{ Name = "Notifications"; Description = "Sending email notifications" }
+    @{ Name = "OneDrive Provisioning"; Description = "Provisioning new users OneDrive" }
+    @{ Name = "Configuring BookWithMeId"; Description = "Configuring BookWithMeId" }
+    @{ Name = "Cleanup and Summary"; Description = "Running cleanup and summary" }
+)
+$script:totalSteps = $progressSteps.Count
+$script:currentStep = 0
+Write-Host "`r  [✓] Progress tracking initialized" -ForegroundColor Green
+
+Write-Host "`n  Beginning New User Request..." -ForegroundColor Cyan
+
+try {
+
+    # Initialize tracking variables
+    $script:startTime = Get-Date
+    $script:errorCount = 0
+    $script:warningCount = 0
+    $script:successCount = 0
+
+    # Step: Initialization
+    Write-ProgressStep -StepName 'Initialization'
+
+    # Load configuration
+    $config = Get-ScriptConfig
+    if (-not $config) {
+        Exit-Script -Message "Failed to load configuration" -ExitCode ConfigError
+    }
+
+    # Connect
+    $script:GraphHeaders = Get-GraphToken -TenantId $($config.Graph.TenantId) -ClientId $($config.Graph.AppId) -ClientCert (Get-ServiceCert $($Config.Graph.CertificateSubject))
+    Connect-ExchangeOnline -AppId $($config.ExchangeOnline.AppId) -Organization $($config.ExchangeOnline.Organization) -CertificateThumbprint (Get-ServiceCert $($Config.ExchangeOnline.CertificateSubject)).Thumbprint -ShowBanner:$false
+
+    # Step: User Input
+    Write-ProgressStep -StepName 'User Input'
+    $userInput = Get-NewUserRequest
+
+    if (-not $userInput) {
+        Exit-Script -Message "Failed to get user input" -ExitCode ConfigError
+    }
+
+    # Set variables after input
+    if ($userInput.TestModeEnabled -eq 'True') {
+        $script:TestMode = $true
+        Write-StatusMessage -Message "Test mode enabled - using test email: $($config.TestMode.Email)" -Type INFO
+    }
+    $script:TestEmailAddress = $config.TestMode.Email
+
+    # Process copy operations
+    switch ($userInput.copyUserOperations) {
+        'Copy Attributes' { $copyUserAttribues = $true }
+        'Copy Groups' { $copyUserGroups = $true }
+        'Copy Attributes and Groups' {
+            $copyUserAttribues = $true
+            $copyUserGroups = $true
+        }
+    }
+
+    # Step: Validation and Preparation (AD)
+    Write-ProgressStep -StepName 'Validation'
+
+    $passwordResult = New-ReadablePassword -GitHubToken $config.GitHub.Token
+    if (-not $passwordResult) {
+        Exit-Script -Message "Failed to generate password" -ExitCode ConfigError
+    }
+
+    $TemplateUserCheck = $false
+
+    # Check is Template User is Enabled
+    if ($userInput.userToCopy) {
+        if (Test-EntraUserIsDisabled -UserToCheck $userInput.userToCopy) {
+            Write-StatusMessage -Message "Template user $($userInput.userToCopy) is disabled. Skipping template copy." -Type WARN
+            $userInput.userToCopy = $null
+        }
+    }
+
+    # Get template user (if copying)
+    if ($userInput.userToCopy) {
+        $TemplateUserCheck = $true
+        $templateData = Get-TemplateUser -UserToCopy $userInput.userToCopy
+        $templateUser = $templateData.TemplateUser
+        $templateAttributes = $templateData.TemplateAttributes
+        $templateUserManager = $templateData.TemplateUserManager
+
+        if ($userInput.domain) {
+            $domain = '@' + $($userInput.domain)
+        } else {
+            $domain = $templateData.Domain
+        }
+
+    } else {
+        if ($userInput.domain) {
+            $domain = '@' + $userInput.domain
+        } else {
+            $domain = '@compassmsp.com'
+        }
+    }
+
+    # Initialize the parameters for New-ADUserProperties and check for duplicate SamAccountName/Mail
+    $newUserParams = @{
+        DisplayName = $userInput.displayName
+        Domain      = $domain
+    }
+
+    # Conditionally add FirstName and LastName if they exist
+    if ($userInput.givenName -and $userInput.surname) {
+        $newUserParams.FirstName = $userInput.givenName
+        $newUserParams.LastName = $userInput.surname
+    }
+
+    # Conditionally add Email if it exists
+    if ($userInput.userPrincipalName) {
+        $newUserParams.userPrincipalName = $userInput.userPrincipalName
+    }
+
+    # Call the New-UserProperties function with the constructed parameters
+    $newUserProperties = New-UserProperties @newUserParams
+    if (-not $newUserProperties) {
+        Exit-Script -Message "Failed to create user properties" -ExitCode UserNotFound
+    }
+
+    # Show summary and get confirmation before creating
+    $confirmUserParams = @{
+        NewUserProperties = $newUserProperties
+        Password          = $passwordResult.PlainPassword
+    }
+
+    if ($templateUser) {
+        $confirmUserParams.TemplateUser = $userInput.userToCopy
+    }
+
+    Confirm-UserCreation @confirmUserParams
+
+    # Step: AD User Creation / Set Attributes
+    Write-ProgressStep -StepName 'New User Creation'
+
+    $NewUserParams = @{
+        NewUser  = $newUserProperties
+        Password = $passwordResult.PlainPassword
+        #SecureStringPassword = $passwordResult.SecurePassword
+    }
+
+    New-UserStandard @NewUserParams
+
+    Write-StatusMessage -Message "Waiting for Entra replication and Graph availability of new user..." -Type INFO
+    Start-Sleep -Seconds 10
+
+    # Set optional fields (from template + form)
+    $setUserParams = @{
+        UserInput = $userInput
+        Identity  = $newUserProperties.userPrincipalName
+    }
+
+    if ($templateAttributes) {
+        $setUserParams.TemplateAttributes = $templateAttributes
+    }
+
+    Set-UserOptionalFields @setUserParams
+
+    # Set manager
+    if ($userInput.manager -or $templateUserManager) {
+        $setUserManagerParams = @{
+            Identity = $newUserProperties.userPrincipalName
+        }
+
+        if ($userInput.manager) {
+            $setUserManagerParams.ManagerInput = $userInput.manager
+        } elseif ($copyUserAttribues -eq $true) {
+            $setUserManagerParams.ManagerInput = $templateUserManager
+        }
+
+        Set-UserManager @setUserManagerParams
+    } else {
+        Write-StatusMessage -Message 'No manager user object selected. Skipping...' -Type WARN
+    }
+
+    # Sleep to allow Entra replication and Graph availability of new user object before proceeding with downstream operations
+    Write-StatusMessage -Message "Waiting for Entra replication and Graph availability of new user..." -Type INFO
+    Start-Sleep -Seconds 20
+
+    # Get Created User object from Graph to retrieve properties for downstream operations (like group assignment and Sapience provisioning)
+    $properties = 'Id', 'Mail', 'DisplayName', 'GivenName', 'Surname',
+    'MobilePhone', 'JobTitle', 'Department', 'OfficeLocation', 'City', 'EmployeeId'
+
+    $uri = "https://graph.microsoft.com/v1.0/users/$($newUserProperties.Email)?`$select=$($properties -join ',')"
+
+    $newUserResponse = Invoke-RestMethod -Method GET -Uri $uri -Headers $script:GraphHeaders
+
+    $MgUser = @{}
+    $properties | ForEach-Object { $MgUser[$_] = $newUserResponse.$_ }
+
+    if ([string]::IsNullOrWhiteSpace($MgUser['Mail'])) {
+        $MgUser['Mail'] = $newUserProperties.Email
+    }
+
+    # Get Manager of new user (for summary and Sapience provisioning)
+    try {
+        $managerResponse = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/users/$($MgUser.Id)/manager" -Headers $script:GraphHeaders
+        $MgUser['Manager'] = $managerResponse
+    } catch {
+        $managerResponse = $null
+        $MgUser['Manager'] = $null
+        if ($_.Exception.Response.StatusCode -ne 404) {
+            Write-StatusMessage -Message "Manager lookup failed: $($_.Exception.Message)" -Type WARN
+        }
+    }
+
+    # License Assignment
+    Write-ProgressStep -StepName 'License Assignment'
+    Write-StatusMessage -Message "Setting Usage Location for new user..." -Type INFO
+
+    # Usage location is required for license assignment to succeed. Set to US by default if not provided in form.
+    $updateUsageLocationBody = @{
+        usageLocation = if ($userInput.usageLocation) { $userInput.usageLocation } else { 'US' }
+    }
+
+    Invoke-RestMethod -Method PATCH -Uri "https://graph.microsoft.com/v1.0/users/$($MgUser.id)" -Headers $script:GraphHeaders -Body ($updateUsageLocationBody | ConvertTo-Json) -ContentType "application/json" | Out-Null
+
+    # Sleep to allow usageLocation to propagate
+    Write-StatusMessage -Message "Waiting for Usage Location to propagate..." -Type INFO
+    Start-Sleep -Seconds 10
+
+    # Required license - will exit on failure
+    Set-UserLicenses -User $MgUser -License $userInput.requiredLicense -Required
+
+    # Ancillary licenses - will continue on failure
+    if ($userInput.ancillaryLicense) {
+        Set-UserLicenses -User $MgUser -License $userInput.ancillaryLicense
+    }
+
+    # Step: Wait for Mailbox
+    Write-ProgressStep -StepName 'Mailbox Provisioning'
+    Write-StatusMessage -Message "Waiting for the mailbox to provision in 365..." -Type INFO
+
+    # Wait for mailbox to be created
+    if (-not (Wait-ForMailbox -Email $newUserProperties.Email)) {
+        Write-StatusMessage -Message "Mailbox not yet provisioned. Some group operations may fail. Please verify group assignments script completes." -Type WARN
+    }
+
+    # Step: Timezone Assignment
+    Write-ProgressStep -StepName 'Set Timezone'
+    Write-StatusMessage -Message "Setting Timezone for new user" -Type INFO
+    if ($userInput.timeZone) {
+        if ($userInput.timeZone -eq 'US Mountain Standard Time (Arizona)') {
+            $userinput.timeZone = 'US Mountain Standard Time'
+        }
+        Set-MailboxRegionalConfiguration -Identity $($newUserProperties.Email) -TimeZone $userinput.timeZone
+        Set-MailboxCalendarConfiguration -Identity $($newUserProperties.Email) -WorkingHoursTimeZone $userinput.timeZone
+    } else {
+        Write-StatusMessage -Message "Timezone for new user not selected. Skipping" -Type ERROR
+    }
+
+    # Step: Entra Group Assignment
+    Write-ProgressStep -StepName 'Entra Group Assignment'
+
+    # Start Group Add Operations
+    try {
+
+        $skippedTemplateUserGroups = $false
+        $allFilteredGroups = [System.Collections.Generic.List[object]]::new()
+        $groupOperationSummary = @{
+            CopyUserGroups   = @{
+                Count  = 0
+                Groups = @()
+                Failed = @()
+            }
+            DepartmentGroups = @{
+                Count  = 0
+                Groups = @()
+                Failed = @()
+            }
+            TotalFailed      = 0
+        }
+
+        # Process copy user groups if selected
+        if ($userInput.userToCopy -and $copyUserGroups) {
+            Write-StatusMessage -Message 'Copy template user groups selected...' -Type INFO
+            try {
+                $copyGroups = Get-CopyUserGroups -userToCopy $userInput.userToCopy
+                if ($copyGroups.Count -gt 0) {
+                    $allFilteredGroups.AddRange($copyGroups)
+                    $groupOperationSummary.CopyUserGroups.Count = $copyGroups.Count
+                    $groupOperationSummary.CopyUserGroups.Groups = $copyGroups.DisplayName
+                    Write-StatusMessage -Message "Found $($copyGroups.Count) groups from template user" -Type INFO
+                } else {
+                    Write-StatusMessage -Message 'No groups found for template user' -Type WARN
+                    $groupOperationSummary.CopyUserGroups.Failed += "No groups found for template user"
+                }
+            } catch {
+                Write-StatusMessage -Message "Failed to get groups from template user: $($_.Exception.Message)" -Type ERROR
+                $groupOperationSummary.CopyUserGroups.Failed += "Failed to get template user groups: $($_.Exception.Message)"
+                $groupOperationSummary.TotalFailed += $copyGroups?.Count ?? 0
+            }
+        } else {
+            Write-StatusMessage -Message 'No copy operations selected. Trying group mapping via selected department group options.' -Type WARN
+            $skippedTemplateUserGroups = $true
+        }
+
+        # Process department groups if selected
+        if ($userInput.DepartmentGroups) {
+            Write-StatusMessage -Message "Processing department groups for: $($userInput.DepartmentGroups -join ', ')" -Type INFO
+            try {
+                $setDepartmentMappings = @{
+                    'All'       = @('All Company')
+                    'NFL - ROC' = @('CMSP - NFL REGION', '[NFL] OnCall', '[NFL] Alerts')
+                    'SFL - ROC' = @('CMSP - SFL REGION', '[SFL] OnCall', '[SFL] Alerts')
+                }
+
+                $deptGroups = Get-DepartmentGroups -departments $userInput.DepartmentGroups -DepartmentMappings $setDepartmentMappings
+                if ($deptGroups.Count -gt 0) {
+                    $allFilteredGroups.AddRange($deptGroups)
+                    $groupOperationSummary.DepartmentGroups.Count = $deptGroups.Count
+                    $groupOperationSummary.DepartmentGroups.Groups = $deptGroups.DisplayName
+                    Write-StatusMessage -Message "Found $($deptGroups.Count) department groups" -Type INFO
+                } else {
+                    Write-StatusMessage -Message 'No department groups found' -Type WARN
+                    $groupOperationSummary.DepartmentGroups.Failed += "No department groups found"
+                }
+            } catch {
+                Write-StatusMessage -Message "Failed to get department groups: $($_.Exception.Message)" -Type ERROR
+                $groupOperationSummary.DepartmentGroups.Failed += "Failed to get department groups: $($_.Exception.Message)"
+                $groupOperationSummary.TotalFailed += $deptGroups?.Count ?? 0
+            }
+        }
+
+        # Process combined groups if any were found
+        if ($allFilteredGroups.Count -gt 0) {
+            Write-StatusMessage -Message "Processing $($allFilteredGroups.Count) total groups..." -Type INFO
+
+            # Get unique groups and validate
+            $uniqueGroups = $allFilteredGroups | Select-Object -Unique -Property id, DisplayName, Mail, GroupType
+            Write-StatusMessage -Message "Found $($uniqueGroups.Count) unique groups after deduplication" -Type INFO
+
+            try {
+                # Add groups to user
+                $groupAddResults = Add-UserToGroups -UserId $mgUser.id -Groups $uniqueGroups
+
+                Write-StatusMessage -Message "User now belongs to $($groupAddResults.SuccessCount) groups" -Type INFO
+                if ($groupAddResults.FailureCount -gt 0) {
+                    Write-StatusMessage -Message "Failed to add $($groupAddResults.FailureCount) groups" -Type WARN
+                    $groupOperationSummary.TotalFailed += $groupAddResults.FailureCount
+
+                    # Add failed groups to respective categories
+                    foreach ($failedGroup in $groupAddResults.FailedGroups) {
+                        if ($copyGroups.DisplayName -contains $failedGroup) {
+                            $groupOperationSummary.CopyUserGroups.Failed += $failedGroup
+                        }
+                        if ($deptGroups.DisplayName -contains $failedGroup) {
+                            $groupOperationSummary.DepartmentGroups.Failed += $failedGroup
+                        }
+                    }
+                }
+            } catch {
+                Write-StatusMessage -Message "Error during group addition: $($_.Exception.Message)" -Type ERROR
+                Write-StatusMessage -Message "Stack Trace: $($_.ScriptStackTrace)" -Type ERROR
+
+                # Set failure counts but continue execution
+                $groupOperationSummary.TotalFailed += $uniqueGroups.Count
+                Write-StatusMessage -Message "Marking all groups as failed but continuing execution" -Type WARN
+
+                # Create empty results object for downstream processing
+                $groupAddResults = @{
+                    SuccessCount = 0
+                    FailureCount = $uniqueGroups.Count
+                    FailedGroups = $uniqueGroups.DisplayName
+                }
+            }
+        } else {
+            Write-StatusMessage -Message 'No groups found to add. Please assign groups manually' -Type WARN
+            # Initialize empty results for downstream processing
+            $groupAddResults = @{
+                SuccessCount = 0
+                FailureCount = 0
+                FailedGroups = @()
+            }
+        }
+    } catch {
+        Write-StatusMessage -Message "Unexpected error during group operations: $($_.Exception.Message)" -Type ERROR
+        Write-StatusMessage -Message "Stack Trace: $($_.ScriptStackTrace)" -Type ERROR
+
+        # Initialize results for downstream processing
+        $groupAddResults = @{
+            SuccessCount = 0
+            FailureCount = $allFilteredGroups.Count
+            FailedGroups = $allFilteredGroups.DisplayName
+        }
+
+        # Ensure TotalFailed reflects any uncaught failures
+        if ($groupOperationSummary.TotalFailed -eq 0) {
+            $groupOperationSummary.TotalFailed = $allFilteredGroups.Count
+        }
+    }
+
+    # Add user to required groups
+    $requiredGroups = @(
+        'All Company'
+        'KnowBe4'
+        'Exclaimer Default'
+    )
+
+    if ($userInput.InstallSapience -eq $true) {
+        $requiredGroups += 'SapienceIQ Users'
+    }
+
+    Add-UserToRequiredGroups -User $mgUser -Groups $requiredGroups
+
+    # Auto-detect Sapience requirement from copied groups
+    if ($userInput.InstallSapience -eq $false -and ($copyGroups.DisplayName -contains 'SapienceIQ Users')) {
+        Write-StatusMessage -Message "Auto-enabling Sapience: 'SapienceIQ Users' found in template user groups" -Type INFO
+        $userInput.InstallSapience = $true
+    }
+
+    # Step: Full Access to managedservices@compassmsp.com
+    Write-ProgressStep -StepName 'Managed Service Mailbox Assignment'
+
+    if ($MgUser.officeLocation -in @('Professional Services', 'Deployment')) {
+        Write-StatusMessage -Message "Adding full access to the managedservices@compassmsp.com mailbox..." -Type INFO
+
+        try {
+            $mailboxPermissionParams = @{
+                Identity        = 'managedservices@compassmsp.com'
+                User            = $newUserProperties.Email
+                AccessRights    = 'FullAccess'
+                InheritanceType = 'All'
+                AutoMapping     = $false
+                ErrorAction     = 'Stop'
+            }
+
+            Add-MailboxPermission @mailboxPermissionParams | Out-Null
+            Write-StatusMessage -Message "Successfully granted full access to managedservices@compassmsp.com mailbox." -Type OK
+        } catch {
+            Write-StatusMessage -Message "Failed to add mailbox permission: $_" -Type ERROR
+        }
+    } else {
+        Write-StatusMessage -Message "User's office location does not require managedservices mailbox access. Skipping..." -Type INFO
+    }
+
+    # Step: Create Connectwise PSA User
+
+    $newPSAMemberResults = $null
+
+    $psaTokenParameters = @{
+        CompanyId  = $config.ConnectWiseManage.CompanyId
+        PublicKey  = $config.ConnectWiseManage.PublicKey
+        PrivateKey = $config.ConnectWiseManage.PrivateKey
+        ClientId   = $config.ConnectWiseManage.ClientId
+    }
+
+    $psaHeaders = Get-ConnectWiseManageToken @psaTokenParameters
+
+    Write-ProgressStep -StepName 'Connectwise PSA Member Creation'
+
+    if (-not $templateData.TemplateUser) {
+        Write-StatusMessage -Message "No template user selected. Skipping Connectwise PSA user creation." -Type WARN
+        $newPSAMemberResults = @{
+            Success = $false
+            Reason  = 'NoTemplateUser'
+            Error   = 'No template user was selected. PSA member creation was skipped.'
+        }
+    } else {
+        Write-StatusMessage -Message "Creating Connectwise PSA member based on template user: $($templateData.TemplateUser)" -Type INFO
+
+        $newPSAMemberParams = @{
+            TemplateUserEmail = $templateData.TemplateUser
+            NewUser           = $MgUser
+            NewUserHireDate   = $userInput.employeeHireDate
+            NewUserPassword   = $passwordResult.PlainPassword
+            Headers           = $psaHeaders
+        }
+
+        $newPSAMemberResults = New-ConnectwisePSAMember @newPSAMemberParams
+
+        if ($newPSAMemberResults.Success -and $newPSAMemberResults.Content.id) {
+            Write-StatusMessage -Message "Successfully created Connectwise PSA user: $($newPSAMemberResults.Content.id) - $($newPSAMemberResults.Content.identifier)" -Type OK
+
+            if ($newPSAMemberResults.EngineerResult) {
+                if ($newPSAMemberResults.EngineerResult.Success) {
+                    Write-StatusMessage -Message "Successfully set as Primary Engineer." -Type OK
+                } else {
+                    Write-StatusMessage -Message "Failed to set as Primary Engineer: $($newPSAMemberResults.EngineerResult.Error)" -Type WARN
+                }
+            }
+
+            Invoke-ConnectWiseHomeActivation -User $MgUser -Headers $Script:GraphHeaders
+
+        } else {
+            $cwErrorDetail = if ($newPSAMemberResults.ResponseBody) { " | $($newPSAMemberResults.ResponseBody)" } else { '' }
+            Write-StatusMessage -Message "Failed to create Connectwise PSA user: $($newPSAMemberResults.Error)$cwErrorDetail" -Type ERROR
+        }
+
+    }
+
+    # Step: Send notifications
+    Write-ProgressStep -StepName 'Notifications'
+
+    if ($($script:TestMode) -eq $false) {
+        # Email hiring manager and People Ops partner about new user creation
+        Write-StatusMessage -Message "Sending new user notification email..." -Type INFO
+        try {
+
+            $emailSubject = "New Account Ready – $($MgUser.displayName)"
+            $emailContent = @"
+Hi,<br><br>
+A new account has been provisioned and is ready for $($MgUser.displayName). Please share the credentials below with them directly - they will be prompted to set a new password upon first sign-in.<br><br>
+<strong>Account Details</strong><br>
+Display Name: $($MgUser.displayName)<br>
+Email Address: $($MgUser.Mail)<br>
+Temporary Password: $($passwordResult.PlainPassword)<br>
+$($newPSAMemberResults.Content.identifier ? "ConnectWise Manage Username: $($newPSAMemberResults.Content.identifier)<br>`n" : "")<br><br>
+<strong>Phone Number / Email Signature</strong><br>
+If the user's direct dial (DID) number needs to be added to their email signature, please notify Internal IT and provide the assigned number. This information should have been provided by the Telecom team. Once received, Internal IT will update the user's email signature accordingly.<br><br>
+If you have any questions or need assistance getting them set up, please reach out to Internal IT for assistance.<br><br>
+Thank you,<br>
+"@
+
+            $newHireNotificationParameters = @{
+                FromAddress = $config.Email.NotificationFrom
+                Subject     = $emailSubject
+                Content     = $emailContent
+            }
+
+            if ($MgUser.Manager.mail) {
+                $newHireNotificationParameters.ToAddress = $($MgUser.Manager.mail)
+            } else {
+                Write-StatusMessage -Message "Manager email not found. Sending new user notification to default email address." -Type WARN
+                $newHireNotificationParameters.ToAddress = $($config.Email.NotificationCcAddress)
+            }
+
+            # Look up People Ops Partner email by display name
+            $PeopleOpsPartnerEmail = $null
+            if ($userInput.peopleOpsPartner) {
+                try {
+                    $peopleOpsUri = "https://graph.microsoft.com/v1.0/users?`$filter=displayName eq '$($userInput.peopleOpsPartner)'&`$select=mail"
+                    $peopleOpsResponse = Invoke-RestMethod -Method GET -Uri $peopleOpsUri -Headers $script:GraphHeaders
+                    if ($peopleOpsResponse.value.Count -gt 0) {
+                        $PeopleOpsPartnerEmail = $peopleOpsResponse.value[0].mail
+                        Write-StatusMessage -Message "People Ops Partner email resolved: $PeopleOpsPartnerEmail" -Type INFO
+                    } else {
+                        Write-StatusMessage -Message "People Ops Partner '$($userInput.peopleOpsPartner)' not found in directory." -Type WARN
+                    }
+                } catch {
+                    Write-StatusMessage -Message "Failed to look up People Ops Partner email: $($_.Exception.Message)" -Type WARN
+                }
+            }
+
+            if ($PeopleOpsPartnerEmail) {
+                $newHireNotificationParameters.CcAddress = $PeopleOpsPartnerEmail
+            } else {
+                Write-StatusMessage -Message "People Ops Partner email not found. Sending new user notification without CC." -Type WARN
+            }
+
+            Send-GraphMailMessage @newHireNotificationParameters
+            Write-StatusMessage -Message "New user notification email sent successfully" -Type OK
+        } catch {
+            Write-StatusMessage -Message "Failed to send new user notification email: $($_.Exception.Message)" -Type ERROR
+        }
+
+        # Email for Salesforce
+        if ($MgUser.department -in @('Sales')) {
+            Write-StatusMessage -Message "User is in Sales department. Sending notification for Salesforce provisioning..." -Type INFO
+            try {
+
+                $emailSubject = "Salesforce – New User"
+                $emailContent = @"
+Please set up the following user with an Salesforce account.<br><br>
+Display Name: $($MgUser.displayName)<br>
+Mail: $($MgUser.Mail)<br>
+Job Title: $($MgUser.jobTitle)<br>
+Manager Email: $($MgUser.Manager.mail)<br>
+Manager Display Name: $($MgUser.Manager.displayName)<br>
+
+<p>
+The user start date is $($userInput.employeeHireDate).<br>
+"@
+
+                Send-GraphMailMessage -FromAddress $($config.Email.NotificationFrom) -ToAddress $($config.Email.NotificationForSalesForceRequests) -CcAddress $($config.Email.NotificationCcAddress) -Subject $emailSubject -Content $emailContent
+                Write-StatusMessage -Message "Salesforce request email sent successfully" -Type OK
+            } catch {
+                Write-StatusMessage -Message "Failed to send Salesforce request email: $($_.Exception.Message)" -Type ERROR
+            }
+        }
+
+        # Create ticket for 8x8 provisioning on the Telcom Board
+        if ($userInput.Send8x8ProvisioningTicket -eq $true) {
+            Write-StatusMessage -Message "Creating ticket for 8x8 provisioning..." -Type INFO
+            try {
+
+                $dialRecipients = "$($MgUser.Manager.mail)"
+                if ($PeopleOpsPartnerEmail) { $dialRecipients += ", $PeopleOpsPartnerEmail" }
+
+                $emailSubject = "8x8 – New User: $($MgUser.displayName)"
+                $callCenter = if ($MgUser.officeLocation -in @('Reactive', 'Managed Services Reactive')) { 'Yes' } else { 'No' }
+
+                $emailContent = @"
+Please set up the following user with an 8x8 account.
+
+Display Name: $($MgUser.displayName)
+Mail: $($newUserProperties.Email)
+Job Title: $($MgUser.jobTitle)
+Department: $($MgUser.department)
+Sub Department: $($MgUser.officeLocation)
+Call Center: $callCenter
+User to Copy: $($userInput.userToCopy)
+Manager Email: $($MgUser.Manager.mail)
+Manager Display Name: $($managerResponse.displayName)
+
+Once the account is set up, please email the user's extension and direct dial number to $($dialRecipients).
+
+Please do not send the welcome email as part of the account setup.
+
+The user's start date is $($userInput.employeeHireDate). Please hold the welcome email and send it on their first day of employment so they receive it when they begin their onboarding process.
+"@
+
+                $body = @{
+                    summary            = $emailSubject
+                    initialDescription = $emailContent
+                    company            = @{
+                        identifier = 'CompassMSP'
+                    }
+                    board              = @{
+                        name = "Telecom Managed Services"
+                    }
+                    status             = @{
+                        name = "+New"
+                    }
+                } | ConvertTo-Json -Depth 10
+
+                $baseUrl = 'https://service.mycompass.cloud/v4_6_release/apis/3.0'
+
+                $8x8TicketResults = Invoke-RestMethod `
+                    -Method Post `
+                    -Uri "$baseUrl/service/tickets" `
+                    -Headers $psaHeaders `
+                    -Body $body `
+                    -ContentType "application/json"
+
+                if ($8x8TicketResults) {
+                    Write-StatusMessage -Message "Successfully created 8x8 provisioning ticket: $($8x8TicketResults.id)" -Type OK
+                } else {
+                    Write-StatusMessage -Message "Failed to create 8x8 provisioning ticket: No response from API" -Type ERROR
+                }
+
+            } catch {
+                Write-StatusMessage -Message "Failed to create 8x8 provisioning ticket: $($_.Exception.Message)" -Type ERROR
+            }
+        }
+
+        # Create ticket for Sapience user provisioning on the Internal Board
+        if ($userInput.InstallSapience -eq $true) {
+            Write-StatusMessage -Message "Creating ticket for Sapience user provisioning..." -Type INFO
+            try {
+
+                $emailSubject = "Sapience – New User: $($MgUser.displayName)"
+
+                $emailContent = @"
+This user is required to have Sapience. Please ensure a user is created in the Sapience portal. You will need the following information to create the user in Sapience:.
+
+First Name: $($MgUser.givenName),
+Last Name: $($MgUser.surname),
+Email: $($MgUser.Mail),
+Worker ID: $($MgUser.EmployeeId)
+Job Title: $($MgUser.jobTitle),
+Job Family: $($MgUser.Department),
+Department: $(if ($MgUser.OfficeLocation) { $MgUser.OfficeLocation } else { $MgUser.Department })
+Manager: $($managerResponse.displayName)
+Domain: AzureAD
+Domain ID: $($MgUser.DisplayName -replace '\s')
+Work Schedule: Default Work Schedule
+Activity Collection: On
+Worker Type: Full-Time
+App Role: Activity Access
+Work Location Type (Custom Fields): $($MgUser.City)
+"@
+
+                $body = @{
+                    summary            = $emailSubject
+                    initialDescription = $emailContent
+                    company            = @{
+                        identifier = 'CompassMSP'
+                    }
+                    board              = @{
+                        name = "Internal Service Desk"
+                    }
+                    status             = @{
+                        name = "+New"
+                    }
+                } | ConvertTo-Json -Depth 10
+
+                $baseUrl = 'https://service.mycompass.cloud/v4_6_release/apis/3.0'
+
+                $sapienceTicketResults = Invoke-RestMethod `
+                    -Method Post `
+                    -Uri "$baseUrl/service/tickets" `
+                    -Headers $psaHeaders `
+                    -Body $body `
+                    -ContentType "application/json"
+
+                if ($sapienceTicketResults) {
+                    Write-StatusMessage -Message "Successfully created Sapience provisioning ticket: $($sapienceTicketResults.id)" -Type OK
+                } else {
+                    Write-StatusMessage -Message "Failed to create Sapience provisioning ticket: No response from API" -Type ERROR
+                }
+
+            } catch {
+                Write-StatusMessage -Message "Failed to create Sapience provisioning ticket: $($_.Exception.Message)" -Type ERROR
+            }
+        }
+
+    } else {
+        Write-StatusMessage -Message "Test mode is enabled. Skipping Salesforce notification, 8x8 ticket and Sapience ticket creation." -Type INFO
+    }
+
+    # Step: OneDrive Provisioning
+    Write-ProgressStep -StepName 'OneDrive Provisioning'
+    Write-StatusMessage -Message "OneDrive provisioning is currently disabled" -Type INFO
+
+    # Step: BookWithMeId Setup
+    Write-ProgressStep -StepName 'Configuring BookWithMeId'
+    Set-UserBookWithMeId -User $MgUser
+
+    # Step 11: Cleanup and Summary
+    Write-ProgressStep -StepName 'Cleanup and Summary'
+    Write-StatusMessage -Message "Disconnecting from Exchange Online and Graph." -Type INFO
+
+    # Disconnect
+    $script:GraphHeaders = $null
+    Disconnect-ExchangeOnline -Confirm:$false
+
+    Write-StatusMessage -Message "Building final summary..." -Type INFO
+
+    $newUserFinalizeParams = @{
+        User                      = $MgUser
+        ManagerDisplayName        = $managerResponse.displayName
+        UserInput                 = $userInput
+        TemplateUserCheck         = $TemplateUserCheck
+        SkippedTemplateUserGroups = [bool]$skippedTemplateUserGroups
+        Password                  = $passwordResult.PlainPassword
+        AssignedGroupCount        = $groupAddResults.SuccessCount
+        GroupOperationSummary     = $groupOperationSummary
+        ConnectwisePSAUserCreated = $newPSAMemberResults
+    }
+
+    Start-NewUserFinalize @newUserFinalizeParams
+
+    # Show duration
+    $endTime = Get-Date
+    $duration = $endTime - $startTime
+    Write-StatusMessage "Script completed in $($duration.TotalMinutes.ToString('F2')) minutes" -Type INFO
+
+    # Give user time to read/copy the summary
+    Write-Host "`nPress Enter to exit..." -ForegroundColor Cyan
+    Read-Host | Out-Null
+
+    # Clear the progress bar
+    Write-Progress -Activity "New User Creation" -Status "Done" -PercentComplete 100
+
+    Exit-Script -Message "$($MgUser.displayName) has been successfully created." -ExitCode Success
+
+} catch {
+    Write-StatusMessage -Message "Script failed: $($_.Exception.Message)" -Type ERROR
+    Write-StatusMessage -Message "At: $($_.InvocationInfo.PositionMessage)" -Type ERROR
+    if ($_.Exception.InnerException) {
+        Write-StatusMessage -Message "Inner exception: $($_.Exception.InnerException.Message)" -Type ERROR
+    }
+    Write-StatusMessage -Message "Stack Trace:`n$($_.ScriptStackTrace)" -Type ERROR
+
+    # Clear the progress bar
+    Write-Progress -Activity "New User Creation" -Status "Failed" -PercentComplete 100
+
+    if ($script:TestMode) {
+        Write-StatusMessage -Message "Test Mode: Unhandled exception. Entering nested prompt — all script variables accessible. Type 'exit' to resume." -Type WARN
+        $host.EnterNestedPrompt()
+    } else {
+        Exit-Script -Message "Script failed during execution" -ExitCode GeneralError
+    }
+}
